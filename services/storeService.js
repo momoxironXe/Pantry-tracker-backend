@@ -2,7 +2,7 @@ const axios = require("axios")
 const Store = require("../models/Store")
 
 // Get nearby stores based on zip code using Google Places API
-const getNearbyStores = async (zipCode, radius = 1000) => {
+const getNearbyStores = async (zipCode, radius = 3000) => {
   try {
     // First, convert zip code to coordinates using Google Geocoding API
     const geocodeResponse = await axios.get(
@@ -19,6 +19,11 @@ const getNearbyStores = async (zipCode, radius = 1000) => {
     const placesResponse = await axios.get(
       `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&keyword=pantry|grocery|food&key=${process.env.GOOGLE_MAPS_API_KEY}`,
     )
+
+    if (placesResponse.data.status === "ZERO_RESULTS") {
+      console.warn(`No stores found for zip code ${zipCode} and radius ${radius}.`);
+      return []; // Return an empty array if no results are found
+    }
 
     if (placesResponse.data.status !== "OK") {
       throw new Error(`Places API failed: ${placesResponse.data.status}`)
