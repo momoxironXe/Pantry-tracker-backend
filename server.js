@@ -15,7 +15,7 @@ const searchRoutes = require("./routes/searchRoutes")
 const app = express()
 
 // Middleware
-app.use(cors)
+app.use(cors())
 app.use(express.json())
 
 // Connect to MongoDB
