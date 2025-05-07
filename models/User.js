@@ -41,6 +41,22 @@ const userSchema = new mongoose.Schema({
     required: true,
     minlength: 6,
   },
+  phoneNumber: {
+    type: String,
+    trim: true,
+  },
+  phoneVerified: {
+    type: Boolean,
+    default: false,
+  },
+  emailVerified: {
+    type: Boolean,
+    default: false,
+  },
+  verificationCode: {
+    code: String,
+    expiresAt: Date,
+  },
   zipCode: {
     type: String,
     required: true,
@@ -48,8 +64,8 @@ const userSchema = new mongoose.Schema({
   },
   shoppingStyle: {
     type: String,
-    enum: ["bulk", "value", "health"],
-    default: "bulk",
+    enum: ["budget", "prepper", "seasonal", "homesteader", "clean", "bulk"],
+    default: "budget",
   },
   preferences: {
     preferredStores: [
@@ -62,6 +78,11 @@ const userSchema = new mongoose.Schema({
       type: [String],
       enum: ["Vegetarian", "Vegan", "Gluten-Free", "Dairy-Free", "Organic", "None"],
       default: ["None"],
+    },
+    alertCategories: {
+      type: [String],
+      enum: ["Meat", "Produce", "Dairy", "Pantry", "Grains", "Canned", "Frozen", "Baking", "All"],
+      default: ["All"],
     },
     notificationPreferences: {
       email: {
@@ -78,6 +99,20 @@ const userSchema = new mongoose.Schema({
           default: false,
         },
       },
+      sms: {
+        enabled: {
+          type: Boolean,
+          default: false,
+        },
+        priceAlerts: {
+          type: Boolean,
+          default: false,
+        },
+        stockAlerts: {
+          type: Boolean,
+          default: false,
+        },
+      },
     },
   },
   pantryItems: [
@@ -90,10 +125,20 @@ const userSchema = new mongoose.Schema({
         type: Number,
         default: 1,
       },
+      monthlyUsage: {
+        type: Number,
+        default: 1,
+      },
       addedAt: {
         type: Date,
         default: Date.now,
       },
+    },
+  ],
+  recipes: [
+    {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Recipe",
     },
   ],
   searchHistory: [searchHistorySchema],

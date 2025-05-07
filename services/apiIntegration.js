@@ -26,8 +26,8 @@ const fetchWalmartProducts = async () => {
     // Define search keywords for Walmart products - include produce keywords
     const searchKeywords = [
       // Pantry items
-      "kirkland organic olive oil",
-      "kirkland organic peanut butter",
+      "kirkland organic mustard",
+      "kirkland organic flour",
 
       // Produce items
       "fresh apples",

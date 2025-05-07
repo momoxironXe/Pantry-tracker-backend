@@ -3,6 +3,7 @@ const PantryItem = require("../models/PantryItem")
 const auth = require("../middleware/auth")
 const priceService = require("../services/priceService")
 const router = express.Router()
+const User = require("../models/User")
 
 // Get all pantry items
 router.get("/", async (req, res) => {
@@ -84,6 +85,169 @@ router.get("/:id", async (req, res) => {
     res.json(item)
   } catch (error) {
     console.error("Error getting pantry item:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Add endpoint to get price trends for an item
+router.get("/price-trends/:id", auth, async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const trends = await priceService.getPriceTrends([id])
+
+    if (!trends || trends.length === 0) {
+      return res.status(404).json({ message: "Price trends not found for this item" })
+    }
+
+    res.json({ trends: trends[0] })
+  } catch (error) {
+    console.error("Error getting price trends:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Add endpoint to get user's pantry items
+router.get("/my-pantry", auth, async (req, res) => {
+  try {
+    // Get user's pantry items with populated item details
+    const user = await User.findById(req.user._id).populate({
+      path: "pantryItems.itemId",
+      model: "PantryItem",
+    })
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    // Format the pantry items
+    const pantryItems = user.pantryItems
+      .map((item) => {
+        const product = item.itemId
+
+        if (!product) {
+          return null
+        }
+
+        return {
+          id: product._id,
+          name: product.name,
+          description: product.description,
+          category: product.category,
+          type: product.type,
+          size: product.size,
+          unit: product.unit,
+          imageUrl: product.imageUrl,
+          quantity: item.quantity,
+          monthlyUsage: item.monthlyUsage || 1,
+          addedAt: item.addedAt,
+          lowestPrice: {
+            price: product.currentLowestPrice?.price || 0,
+            store: product.currentLowestPrice?.storeName || "Unknown Store",
+          },
+          priceTrend: product.priceTrend || {},
+          priceAlerts: product.priceAlerts || {},
+        }
+      })
+      .filter(Boolean)
+
+    res.json({ pantryItems })
+  } catch (error) {
+    console.error("Error getting user's pantry:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Add endpoint to add item to user's pantry
+router.post("/my-pantry", auth, async (req, res) => {
+  try {
+    const { itemId, quantity, monthlyUsage } = req.body
+
+    if (!itemId) {
+      return res.status(400).json({ message: "Item ID is required" })
+    }
+
+    // Find the item
+    const item = await PantryItem.findById(itemId)
+
+    if (!item) {
+      return res.status(404).json({ message: "Item not found" })
+    }
+
+    // Check if item is already in user's pantry
+    const existingItem = req.user.pantryItems.find((pantryItem) => pantryItem.itemId.toString() === itemId)
+
+    if (existingItem) {
+      // Update existing item
+      existingItem.quantity = quantity || existingItem.quantity
+      existingItem.monthlyUsage = monthlyUsage || existingItem.monthlyUsage || 1
+    } else {
+      // Add new item to pantry
+      req.user.pantryItems.push({
+        itemId,
+        quantity: quantity || 1,
+        monthlyUsage: monthlyUsage || 1,
+        addedAt: new Date(),
+      })
+    }
+
+    await req.user.save()
+
+    res.json({
+      message: "Item added to your pantry",
+      pantryItems: req.user.pantryItems,
+    })
+  } catch (error) {
+    console.error("Error adding to pantry:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Add endpoint to update pantry item
+router.patch("/my-pantry/:itemId", auth, async (req, res) => {
+  try {
+    const { itemId } = req.params
+    const { quantity, monthlyUsage } = req.body
+
+    // Find the item in user's pantry
+    const pantryItem = req.user.pantryItems.find((item) => item.itemId.toString() === itemId)
+
+    if (!pantryItem) {
+      return res.status(404).json({ message: "Item not found in your pantry" })
+    }
+
+    // Update fields
+    if (quantity !== undefined) pantryItem.quantity = quantity
+    if (monthlyUsage !== undefined) pantryItem.monthlyUsage = monthlyUsage
+
+    await req.user.save()
+
+    res.json({
+      message: "Pantry item updated",
+      pantryItem,
+    })
+  } catch (error) {
+    console.error("Error updating pantry item:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Add endpoint to remove item from user's pantry
+router.delete("/my-pantry/:itemId", auth, async (req, res) => {
+  try {
+    const { itemId } = req.params
+
+    // Remove the item from pantry
+    req.user.pantryItems = req.user.pantryItems.filter((item) => item.itemId.toString() !== itemId)
+
+    await req.user.save()
+
+    res.json({
+      message: "Item removed from your pantry",
+      pantryItems: req.user.pantryItems,
+    })
+  } catch (error) {
+    console.error("Error removing from pantry:", error)
     res.status(500).json({ message: "Server error", error: error.message })
   }
 })

@@ -18,6 +18,7 @@ const priceHistorySchema = new mongoose.Schema({
   },
 })
 
+// Add fields for price trends and contextual nudges
 const pantryItemSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -29,12 +30,12 @@ const pantryItemSchema = new mongoose.Schema({
   },
   category: {
     type: String,
-    enum: ["Pantry", "Produce", "Dairy", "Meat", "Bakery", "Frozen", "Other"],
+    enum: ["Pantry", "Produce", "Dairy", "Meat", "Bakery", "Frozen", "Grains", "Canned", "Baking", "Other"],
     default: "Pantry",
   },
   type: {
     type: String,
-    enum: ["Store Brand", "National Brand", "Organic"],
+    enum: ["Store Brand", "National Brand", "Organic", "Local"],
     default: "National Brand",
   },
   size: {
@@ -60,6 +61,7 @@ const pantryItemSchema = new mongoose.Schema({
       type: mongoose.Schema.Types.ObjectId,
       ref: "Store",
     },
+    storeName: String,
     lastUpdated: {
       type: Date,
       default: Date.now,
@@ -73,12 +75,27 @@ const pantryItemSchema = new mongoose.Schema({
       default: 6, // weeks
     },
   },
-  isBuyRecommended: {
-    type: Boolean,
-    default: false,
+  priceTrend: {
+    weeklyChange: Number, // percentage change from last week
+    monthlyChange: Number, // percentage change from last month
+    threeMonthChange: Number, // percentage change from three months ago
   },
-  buyRecommendationReason: {
-    type: String,
+  priceAlerts: {
+    isLowestInPeriod: {
+      type: Boolean,
+      default: false,
+    },
+    isSeasonalLow: {
+      type: Boolean,
+      default: false,
+    },
+    isBuyRecommended: {
+      type: Boolean,
+      default: false,
+    },
+    buyRecommendationReason: {
+      type: String,
+    },
   },
   isHealthy: {
     type: Boolean,
@@ -100,6 +117,13 @@ const pantryItemSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  seasonality: {
+    peakMonths: [Number], // 1-12 for Jan-Dec
+    currentlySeasonal: {
+      type: Boolean,
+      default: false,
+    },
+  },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -117,7 +141,7 @@ pantryItemSchema.pre("save", function (next) {
 })
 
 // Method to add a new price point to history
-pantryItemSchema.methods.addPricePoint = function (storeId, price) {
+pantryItemSchema.methods.addPricePoint = function (storeId, price, storeName) {
   if (!price || isNaN(price) || price <= 0) {
     console.warn(`Invalid price: ${price} for item ${this.name}`)
     return
@@ -136,6 +160,7 @@ pantryItemSchema.methods.addPricePoint = function (storeId, price) {
     this.currentLowestPrice = {
       price,
       storeId,
+      storeName,
       lastUpdated: new Date(),
     }
     console.log(`Updated lowest price for ${this.name} to $${price}`)
@@ -170,8 +195,8 @@ pantryItemSchema.methods.checkBuyRecommendation = function () {
   const threshold = this.priceRange.min * 1.05
 
   if (this.currentLowestPrice.price <= threshold) {
-    this.isBuyRecommended = true
-    this.buyRecommendationReason = "Price is at or near 6-week low"
+    this.priceAlerts.isBuyRecommended = true
+    this.priceAlerts.buyRecommendationReason = "Price is at or near 6-week low"
 
     // Mark this price point as the lowest in period
     const latestPricePoint = this.priceHistory[this.priceHistory.length - 1]
@@ -181,9 +206,108 @@ pantryItemSchema.methods.checkBuyRecommendation = function () {
 
     console.log(`Buy recommendation set for ${this.name} at $${this.currentLowestPrice.price}`)
   } else {
-    this.isBuyRecommended = false
-    this.buyRecommendationReason = ""
+    this.priceAlerts.isBuyRecommended = false
+    this.priceAlerts.buyRecommendationReason = ""
   }
+}
+
+// Add method to calculate price trends
+pantryItemSchema.methods.calculatePriceTrends = function () {
+  if (!this.priceHistory || this.priceHistory.length < 2) {
+    return
+  }
+
+  const currentPrice = this.currentLowestPrice.price
+  if (!currentPrice) return
+
+  // Sort price history by date (newest first)
+  const sortedHistory = [...this.priceHistory].sort((a, b) => b.date - a.date)
+
+  // Get prices from different time periods
+  const now = new Date()
+  const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+  const oneMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+  const threeMonthsAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000)
+
+  // Find closest price points to these dates
+  const weeklyPrice = this.findClosestPriceToDate(sortedHistory, oneWeekAgo)
+  const monthlyPrice = this.findClosestPriceToDate(sortedHistory, oneMonthAgo)
+  const threeMonthPrice = this.findClosestPriceToDate(sortedHistory, threeMonthsAgo)
+
+  // Calculate percentage changes
+  this.priceTrend = {
+    weeklyChange: weeklyPrice ? ((currentPrice - weeklyPrice) / weeklyPrice) * 100 : null,
+    monthlyChange: monthlyPrice ? ((currentPrice - monthlyPrice) / monthlyPrice) * 100 : null,
+    threeMonthChange: threeMonthPrice ? ((currentPrice - threeMonthPrice) / threeMonthPrice) * 100 : null,
+  }
+
+  // Set price alerts based on trends
+  this.updatePriceAlerts()
+}
+
+// Helper method to find closest price to a date
+pantryItemSchema.methods.findClosestPriceToDate = (history, targetDate) => {
+  if (!history || history.length === 0) return null
+
+  let closestRecord = null
+  let closestDiff = Number.POSITIVE_INFINITY
+
+  for (const record of history) {
+    const diff = Math.abs(record.date.getTime() - targetDate.getTime())
+    if (diff < closestDiff) {
+      closestDiff = diff
+      closestRecord = record
+    }
+  }
+
+  return closestRecord ? closestRecord.price : null
+}
+
+// Method to update price alerts based on trends
+pantryItemSchema.methods.updatePriceAlerts = function () {
+  const alerts = {
+    isLowestInPeriod: false,
+    isSeasonalLow: false,
+    isBuyRecommended: false,
+    buyRecommendationReason: "",
+  }
+
+  // Check if current price is lowest in period
+  if (
+    this.currentLowestPrice.price &&
+    this.priceRange.min &&
+    this.currentLowestPrice.price <= this.priceRange.min * 1.02
+  ) {
+    // Within 2% of minimum
+    alerts.isLowestInPeriod = true
+    alerts.isBuyRecommended = true
+    alerts.buyRecommendationReason = "Price is at or near 6-week low"
+  }
+
+  // Check if price has dropped significantly from last month
+  if (this.priceTrend && this.priceTrend.monthlyChange && this.priceTrend.monthlyChange <= -10) {
+    alerts.isBuyRecommended = true
+    alerts.buyRecommendationReason = "Price has dropped 10% or more from last month"
+  }
+
+  // Check if item is seasonal and currently in season
+  if (this.isSeasonalProduce && this.seasonality && this.seasonality.currentlySeasonal) {
+    alerts.isSeasonalLow = true
+    alerts.isBuyRecommended = true
+    alerts.buyRecommendationReason = "Seasonal produce currently at peak freshness and value"
+  }
+
+  this.priceAlerts = alerts
+}
+
+// Method to update seasonality based on current month
+pantryItemSchema.methods.updateSeasonality = function () {
+  if (!this.seasonality || !this.seasonality.peakMonths || this.seasonality.peakMonths.length === 0) {
+    return
+  }
+
+  const currentMonth = new Date().getMonth() + 1 // 1-12 for Jan-Dec
+  this.seasonality.currentlySeasonal = this.seasonality.peakMonths.includes(currentMonth)
 }
 
 const PantryItem = mongoose.model("PantryItem", pantryItemSchema)

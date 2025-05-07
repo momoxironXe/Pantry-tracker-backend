@@ -227,4 +227,81 @@ router.get("/produce-items", auth, async (req, res) => {
   }
 })
 
+// Add endpoint to get price trends for dashboard
+router.get("/price-trends", auth, async (req, res) => {
+  try {
+    const { items } = req.query
+
+    let itemIds = []
+
+    if (items) {
+      // If specific items are requested
+      itemIds = items.split(",")
+    } else {
+      const User = require("../models/User")
+      const PantryItem = require("../models/PantryItem")
+      // Otherwise get user's pantry items
+      const user = await User.findById(req.user._id)
+      itemIds = user.pantryItems.map((item) => item.itemId)
+
+      // If user has no pantry items, get some popular items
+      if (itemIds.length === 0) {
+        const popularItems = await PantryItem.find({
+          isFeatured: true,
+        }).limit(5)
+
+        itemIds = popularItems.map((item) => item._id)
+      }
+    }
+
+    const trends = await priceService.getPriceTrends(itemIds)
+
+    res.json({ trends })
+  } catch (error) {
+    console.error("Error getting price trends:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Add endpoint to get recipe price trends
+router.get("/recipe-trends", auth, async (req, res) => {
+  try {
+    const Recipe = require("../models/Recipe")
+    // Get user's recipes
+    const recipes = await Recipe.find({ userId: req.user._id })
+
+    if (recipes.length === 0) {
+      return res.json({ recipes: [] })
+    }
+
+    // Format recipe data for frontend
+    const recipeData = recipes.map((recipe) => {
+      // Get price history in a format suitable for charts
+      const priceHistory = recipe.priceHistory.map((record) => ({
+        date: record.date,
+        price: record.totalPrice,
+      }))
+
+      // Sort by date
+      priceHistory.sort((a, b) => a.date - b.date)
+
+      return {
+        id: recipe._id,
+        name: recipe.name,
+        currentPrice: recipe.currentPrice.totalPrice,
+        percentChange: {
+          weekly: recipe.currentPrice.percentChange.weekly,
+          monthly: recipe.currentPrice.percentChange.monthly,
+        },
+        priceHistory,
+      }
+    })
+
+    res.json({ recipes: recipeData })
+  } catch (error) {
+    console.error("Error getting recipe trends:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
 module.exports = router

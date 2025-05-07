@@ -6,12 +6,196 @@ const storeService = require("../services/storeService")
 const priceService = require("../services/priceService")
 const apiIntegration = require("../services/apiIntegration")
 const PantryItem = require("../models/PantryItem")
+const EmailVerification = require("../models/EmailVerification") // Import EmailVerification model
+const SmsVerification = require("../models/SmsVerification") // Import SmsVerification model
+const emailService = require("../services/emailService")
 const router = express.Router()
+
+// Add email verification endpoints
+router.post("/verify-email", async (req, res) => {
+  try {
+    const { email, code } = req.body
+
+    if (!email || !code) {
+      return res.status(400).json({ message: "Email and verification code are required" })
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email })
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    // Find verification record
+    const verification = await EmailVerification.findOne({
+      userId: user._id,
+      email,
+      verificationCode: code,
+    })
+
+    if (!verification) {
+      return res.status(400).json({ message: "Invalid verification code" })
+    }
+
+    if (verification.isExpired()) {
+      return res.status(400).json({ message: "Verification code has expired" })
+    }
+
+    // Mark as verified
+    verification.verified = true
+    await verification.save()
+
+    // Update user
+    user.emailVerified = true
+    await user.save()
+
+    // Generate a token for the frontend to use
+    const token = await user.generateAuthToken()
+
+    res.json({
+      message: "Email verified successfully",
+      token,
+      user: {
+        _id: user._id,
+        email: user.email,
+        emailVerified: true,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        fullName: `${user.firstName} ${user.lastName}`,
+        zipCode: user.zipCode,
+        shoppingStyle: user.shoppingStyle,
+      },
+    })
+  } catch (error) {
+    console.error("Error verifying email:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Check if email is verified
+router.post("/check-email-verification", async (req, res) => {
+  try {
+    const { email } = req.body
+
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" })
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email })
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    res.json({ verified: user.emailVerified })
+  } catch (error) {
+    console.error("Error checking email verification:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+router.post("/resend-verification", async (req, res) => {
+  try {
+    const { email } = req.body
+
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" })
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email })
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    // Send new verification email
+    const result = await emailService.sendVerificationEmail(user._id, email)
+
+    if (!result.success) {
+      throw new Error(result.error || "Failed to send verification email")
+    }
+
+    // For development, include the verification code in the response
+    const responseData = { message: "Verification email sent" }
+    if (process.env.NODE_ENV === "development") {
+      responseData.code = result.code
+    }
+
+    res.json(responseData)
+  } catch (error) {
+    console.error("Error resending verification:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Add phone verification endpoints
+router.post("/verify-phone", auth, async (req, res) => {
+  try {
+    const { phoneNumber, code } = req.body
+
+    if (!phoneNumber || !code) {
+      return res.status(400).json({ message: "Phone number and verification code are required" })
+    }
+
+    // Find verification record
+    const verification = await SmsVerification.findOne({
+      userId: req.user._id,
+      phoneNumber,
+      verificationCode: code,
+      verified: false,
+    })
+
+    if (!verification) {
+      return res.status(400).json({ message: "Invalid verification code" })
+    }
+
+    if (verification.isExpired()) {
+      return res.status(400).json({ message: "Verification code has expired" })
+    }
+
+    // Mark as verified
+    verification.verified = true
+    await verification.save()
+
+    // Update user
+    req.user.phoneNumber = phoneNumber
+    req.user.phoneVerified = true
+    await req.user.save()
+
+    res.json({ message: "Phone number verified successfully" })
+  } catch (error) {
+    console.error("Error verifying phone:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+router.post("/send-phone-verification", auth, async (req, res) => {
+  try {
+    const { phoneNumber } = req.body
+
+    if (!phoneNumber) {
+      return res.status(400).json({ message: "Phone number is required" })
+    }
+
+    // Send verification SMS
+    const smsService = require("../services/smsService")
+    const sent = await smsService.sendVerificationSms(req.user._id, phoneNumber)
+
+    if (!sent) {
+      throw new Error("Failed to send verification SMS")
+    }
+
+    res.json({ message: "Verification SMS sent" })
+  } catch (error) {
+    console.error("Error sending phone verification:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
 
 // Register a new user
 router.post("/register", async (req, res) => {
   try {
-    const { firstName, lastName, email, password, zipCode, shoppingStyle } = req.body
+    const { firstName, lastName, email, password, zipCode, shoppingStyle, phoneNumber } = req.body
 
     // Check if user already exists
     const existingUser = await User.findOne({ email })
@@ -26,7 +210,9 @@ router.post("/register", async (req, res) => {
       email,
       password,
       zipCode,
-      shoppingStyle: shoppingStyle,
+      shoppingStyle: shoppingStyle || "budget",
+      phoneNumber: phoneNumber || undefined,
+      emailVerified: false,
     })
 
     // Save user
@@ -42,12 +228,19 @@ router.post("/register", async (req, res) => {
     })
     await dataFetchStatus.save()
 
+    // Send verification email
+    const emailResult = await emailService.sendVerificationEmail(user._id, email)
+
+    // if (!emailResult.success) {
+    //   console.error("Failed to send verification email:", emailResult.error)
+    // }
+
     // Start the background process to fetch stores and products
     // This will run asynchronously and not block the response
     fetchDataInBackground(user._id, zipCode, shoppingStyle)
 
-    // Respond immediately with user data and token
-    res.status(201).json({
+    // Response object
+    const responseData = {
       user: {
         _id: user._id,
         firstName: user.firstName,
@@ -56,10 +249,21 @@ router.post("/register", async (req, res) => {
         email: user.email,
         zipCode: user.zipCode,
         shoppingStyle: user.shoppingStyle,
+        emailVerified: user.emailVerified,
       },
       token,
       dataFetchStatus: "pending", // Let the frontend know data fetching is in progress
-    })
+      emailVerificationRequired: true,
+      emailSent: emailResult.success,
+    }
+
+    // For development, include the verification code in the response
+    if (process.env.NODE_ENV === "development" && emailResult.code) {
+      responseData.verificationCode = emailResult.code
+    }
+
+    // Respond immediately with user data and token
+    res.status(201).json(responseData)
   } catch (error) {
     console.error("Error registering user:", error)
     res.status(500).json({ message: "Server error", error: error.message })
@@ -212,6 +416,17 @@ router.post("/login", async (req, res) => {
     // Find user by credentials
     const user = await User.findByCredentials(email, password)
 
+    // Check if email is verified
+    // if (!user.emailVerified) {
+    //   // Send a new verification email
+    //   await emailService.sendVerificationEmail(user._id, email)
+
+    //   return res.status(403).json({
+    //     message: "Email not verified. A new verification code has been sent to your email.",
+    //     emailVerificationRequired: true,
+    //   })
+    // }
+
     // Generate auth token
     const token = await user.generateAuthToken()
 
@@ -229,9 +444,10 @@ router.post("/login", async (req, res) => {
         email: user.email,
         zipCode: user.zipCode,
         shoppingStyle: user.shoppingStyle,
+        // emailVerified: user.emailVerified,
       },
       token,
-      dataFetchStatus: fetchStatus,
+      dataFetchStatus: fetcStatus,
     })
   } catch (error) {
     console.error("Error logging in:", error)

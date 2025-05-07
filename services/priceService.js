@@ -456,9 +456,134 @@ const getBuyAlerts = async (zipCode, shoppingType, limit = 4) => {
   }
 }
 
+// Add method to update price trends for all items
+const updatePriceTrends = async () => {
+  try {
+    console.log("Updating price trends for all items...")
+
+    // Get all pantry items with price history
+    const items = await PantryItem.find({
+      "priceHistory.0": { $exists: true },
+    })
+
+    console.log(`Found ${items.length} items with price history`)
+
+    let updatedCount = 0
+
+    for (const item of items) {
+      // Calculate price trends
+      item.calculatePriceTrends()
+
+      // Update seasonality
+      item.updateSeasonality()
+
+      await item.save()
+      updatedCount++
+    }
+
+    console.log(`Successfully updated price trends for ${updatedCount} items`)
+    return true
+  } catch (error) {
+    console.error("Error updating price trends:", error)
+    return false
+  }
+}
+
+// Add method to get items with price alerts
+const getItemsWithPriceAlerts = async (category = null) => {
+  try {
+    const query = {
+      "priceAlerts.isBuyRecommended": true,
+    }
+
+    if (category) {
+      query.category = category
+    }
+
+    const items = await PantryItem.find(query).sort({ "currentLowestPrice.lastUpdated": -1 }).limit(50)
+
+    return items
+  } catch (error) {
+    console.error("Error getting items with price alerts:", error)
+    return []
+  }
+}
+
+// Add method to get price trends for specific items
+const getPriceTrends = async (itemIds) => {
+  try {
+    if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
+      return []
+    }
+
+    const items = await PantryItem.find({
+      _id: { $in: itemIds },
+    })
+
+    // Format price history for each item
+    const trends = items.map((item) => {
+      // Group price history by month
+      const monthlyPrices = {}
+
+      item.priceHistory.forEach((record) => {
+        const date = new Date(record.date)
+        const monthKey = `${date.getFullYear()}-${date.getMonth() + 1}`
+
+        if (!monthlyPrices[monthKey]) {
+          monthlyPrices[monthKey] = []
+        }
+
+        monthlyPrices[monthKey].push(record.price)
+      })
+
+      // Calculate average price for each month
+      const monthlyAverages = Object.keys(monthlyPrices).map((month) => {
+        const prices = monthlyPrices[month]
+        const avgPrice = prices.reduce((sum, price) => sum + price, 0) / prices.length
+
+        const [year, monthNum] = month.split("-")
+        const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        const monthName = monthNames[Number.parseInt(monthNum) - 1]
+
+        return {
+          month: `${monthName} ${year}`,
+          price: avgPrice.toFixed(2),
+        }
+      })
+
+      // Sort by date
+      monthlyAverages.sort((a, b) => {
+        const aMonth = a.month.split(" ")
+        const bMonth = b.month.split(" ")
+
+        const aDate = new Date(`${aMonth[0]} 1, ${aMonth[1]}`)
+        const bDate = new Date(`${bMonth[0]} 1, ${bMonth[1]}`)
+
+        return aDate - bDate
+      })
+
+      return {
+        id: item._id,
+        name: item.name,
+        currentPrice: item.currentLowestPrice?.price || 0,
+        priceTrend: item.priceTrend || {},
+        monthlyPrices: monthlyAverages,
+      }
+    })
+
+    return trends
+  } catch (error) {
+    console.error("Error getting price trends:", error)
+    return []
+  }
+}
+
 module.exports = {
   fetchStorePrices,
   updatePriceHistory,
   getTopPantryItems,
   getBuyAlerts,
+  updatePriceTrends,
+  getItemsWithPriceAlerts,
+  getPriceTrends,
 }
