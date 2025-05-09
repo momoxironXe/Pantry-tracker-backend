@@ -415,6 +415,7 @@ router.post("/login", async (req, res) => {
 
     // Find user by credentials
     const user = await User.findByCredentials(email, password)
+    console.log("USER RESULT: ", user)
 
     // Check if email is verified
     // if (!user.emailVerified) {
@@ -447,7 +448,7 @@ router.post("/login", async (req, res) => {
         // emailVerified: user.emailVerified,
       },
       token,
-      dataFetchStatus: fetcStatus,
+      dataFetchStatus: fetchStatus,
     })
   } catch (error) {
     console.error("Error logging in:", error)
