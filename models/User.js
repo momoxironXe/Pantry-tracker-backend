@@ -64,7 +64,7 @@ const userSchema = new mongoose.Schema({
   },
   shoppingStyle: {
     type: String,
-    enum: ["budget", "prepper", "seasonal", "homesteader", "clean", "bulk"],
+    enum: ["budget", "prepper", "seasonal", "homesteader", "clean", "bulk", "value"],
     default: "budget",
   },
   preferences: {

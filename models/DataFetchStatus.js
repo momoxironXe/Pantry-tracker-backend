@@ -12,6 +12,16 @@ const dataFetchStatusSchema = new mongoose.Schema({
     enum: ["pending", "completed", "failed"],
     default: "pending",
   },
+  progress: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 100,
+  },
+  message: {
+    type: String,
+    default: "Initializing data fetch...",
+  },
   startedAt: {
     type: Date,
     default: Date.now,
@@ -22,21 +32,10 @@ const dataFetchStatusSchema = new mongoose.Schema({
   error: {
     type: String,
   },
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
-  updatedAt: {
-    type: Date,
-    default: Date.now,
-  },
 })
 
-// Update the updatedAt field before saving
-dataFetchStatusSchema.pre("save", function (next) {
-  this.updatedAt = Date.now()
-  next()
-})
+// Index to automatically expire documents after 7 days
+dataFetchStatusSchema.index({ startedAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60 })
 
 const DataFetchStatus = mongoose.model("DataFetchStatus", dataFetchStatusSchema)
 

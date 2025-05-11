@@ -9,6 +9,8 @@ const emailVerificationSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
+    trim: true,
+    lowercase: true,
   },
   verificationCode: {
     type: String,
@@ -17,6 +19,9 @@ const emailVerificationSchema = new mongoose.Schema({
   expiresAt: {
     type: Date,
     required: true,
+    default: () => {
+      return new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours from now
+    },
   },
   verified: {
     type: Boolean,
@@ -25,6 +30,7 @@ const emailVerificationSchema = new mongoose.Schema({
   createdAt: {
     type: Date,
     default: Date.now,
+    expires: 86400, // Automatically delete after 24 hours (in seconds)
   },
 })
 

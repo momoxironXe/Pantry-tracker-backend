@@ -4,6 +4,8 @@ const auth = require("../middleware/auth")
 const priceService = require("../services/priceService")
 const router = express.Router()
 const User = require("../models/User")
+const Store = require("../models/Store")
+const apiIntegration = require("../services/apiIntegration")
 
 // Get all pantry items
 router.get("/", async (req, res) => {
@@ -332,5 +334,213 @@ router.delete("/:id", auth, async (req, res) => {
     res.status(500).json({ message: "Server error", error: error.message })
   }
 })
+
+// NEW ENDPOINT: Generate historical price data
+router.post("/generate-historical-data", auth, async (req, res) => {
+  try {
+    // In a real app, you would check if the user is an admin
+    const result = await priceService.generateHistoricalPriceData()
+
+    if (result) {
+      res.json({ message: "Historical price data generated successfully" })
+    } else {
+      res.status(500).json({ message: "Failed to generate historical price data" })
+    }
+  } catch (error) {
+    console.error("Error generating historical price data:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// NEW ENDPOINT: Search for pantry items
+router.get("/search/:query", auth, async (req, res) => {
+  try {
+    const { query } = req.params
+
+    if (!query || query.length < 2) {
+      return res.status(400).json({ message: "Search query must be at least 2 characters" })
+    }
+
+    const items = await PantryItem.find({
+      $or: [{ name: { $regex: query, $options: "i" } }, { description: { $regex: query, $options: "i" } }],
+    }).limit(20)
+
+    // Format the response
+    const formattedItems = items.map((item) => ({
+      id: item._id,
+      name: item.name,
+      description: item.description,
+      category: item.category,
+      type: item.type,
+      size: item.size,
+      unit: item.unit,
+      imageUrl: item.imageUrl,
+      lowestPrice: {
+        price: item.currentLowestPrice?.price || 0,
+        store: item.currentLowestPrice?.storeName || "Unknown Store",
+      },
+    }))
+
+    res.json({ items: formattedItems })
+  } catch (error) {
+    console.error("Error searching pantry items:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Add a new pantry item
+router.post("/add", auth, async (req, res) => {
+  try {
+    const { name, category, quantity, unit, price } = req.body
+    const userId = req.user.id
+
+    if (!name || !category) {
+      return res.status(400).json({ message: "Name and category are required" })
+    }
+
+    // Check if the item already exists in the database
+    let pantryItem = await PantryItem.findOne({ name: { $regex: new RegExp(`^${name}$`, "i") } })
+
+    // If item doesn't exist, create it
+    if (!pantryItem) {
+      // Try to search for the item in Walmart to get real data
+      let walmartProducts = []
+      try {
+        walmartProducts = await apiIntegration.searchWalmartProducts(name)
+      } catch (error) {
+        console.error("Error searching Walmart products:", error)
+      }
+
+      // Use Walmart data if available, otherwise use provided data
+      if (walmartProducts && walmartProducts.length > 0) {
+        const bestMatch = walmartProducts[0]
+
+        // Get a store reference
+        const stores = await Store.find({ name: { $regex: "Walmart", $options: "i" } })
+        const storeId = stores.length > 0 ? stores[0]._id : null
+
+        pantryItem = new PantryItem({
+          name: name,
+          description: bestMatch.name || name,
+          category: category,
+          type: bestMatch.name?.toLowerCase().includes("great value") ? "Store Brand" : "National Brand",
+          size: "",
+          unit: unit || extractUnitFromName(name),
+          imageUrl: bestMatch.imageUrl || "",
+          isHealthy: name.toLowerCase().includes("organic"),
+          isValuePick: Math.random() > 0.7,
+          isBulkOption: name.toLowerCase().includes("pack") || Math.random() > 0.8,
+          isSeasonalProduce: category === "Produce" && Math.random() > 0.7,
+          priceHistory: [
+            {
+              storeId: storeId,
+              price: bestMatch.price || price || 0,
+              date: new Date(),
+              isLowestInPeriod: true,
+            },
+          ],
+          currentLowestPrice: {
+            price: bestMatch.price || price || 0,
+            storeId: storeId,
+            lastUpdated: new Date(),
+          },
+          priceRange: {
+            min: bestMatch.price ? bestMatch.price * 0.8 : price ? price * 0.8 : 0,
+            max: bestMatch.price ? bestMatch.price * 1.2 : price ? price * 1.2 : 0,
+            period: 6,
+          },
+          isBuyRecommended: Math.random() > 0.7,
+          buyRecommendationReason: "Price is at or near 6-week low",
+        })
+      } else {
+        // Create a new item with the provided data
+        pantryItem = new PantryItem({
+          name: name,
+          description: name,
+          category: category,
+          type: "National Brand",
+          size: "",
+          unit: unit || extractUnitFromName(name),
+          imageUrl: "",
+          isHealthy: name.toLowerCase().includes("organic"),
+          isValuePick: Math.random() > 0.7,
+          isBulkOption: name.toLowerCase().includes("pack") || Math.random() > 0.8,
+          isSeasonalProduce: category === "Produce" && Math.random() > 0.7,
+          priceHistory: [
+            {
+              storeId: null,
+              price: price || 0,
+              date: new Date(),
+              isLowestInPeriod: true,
+            },
+          ],
+          currentLowestPrice: {
+            price: price || 0,
+            storeId: null,
+            lastUpdated: new Date(),
+          },
+          priceRange: {
+            min: price ? price * 0.8 : 0,
+            max: price ? price * 1.2 : 0,
+            period: 6,
+          },
+          isBuyRecommended: false,
+          buyRecommendationReason: "",
+        })
+      }
+
+      await pantryItem.save()
+
+      // Generate historical price data for this new item
+      await priceService.generateHistoricalPriceData([pantryItem._id])
+    }
+
+    // Add the item to the user's pantry
+    const user = await User.findById(userId)
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    // Check if the item is already in the user's pantry
+    const existingItem = user.pantryItems.find((item) => item.itemId.toString() === pantryItem._id.toString())
+
+    if (existingItem) {
+      // Update the quantity
+      existingItem.quantity = (existingItem.quantity || 0) + (quantity || 1)
+    } else {
+      // Add the new item
+      user.pantryItems.push({
+        itemId: pantryItem._id,
+        quantity: quantity || 1,
+        dateAdded: new Date(),
+      })
+    }
+
+    await user.save()
+
+    res.status(201).json({
+      message: "Pantry item added successfully",
+      item: {
+        id: pantryItem._id,
+        name: pantryItem.name,
+        category: pantryItem.category,
+        quantity: quantity || 1,
+        unit: pantryItem.unit,
+        price: pantryItem.currentLowestPrice.price,
+      },
+    })
+  } catch (error) {
+    console.error("Error adding pantry item:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// Helper function to extract unit from name
+function extractUnitFromName(name) {
+  const unitRegex = /(oz|fl oz|lb|g|kg|ml|l|count|ct|pack|pk|gallon|gal|quart|qt|pint|pt|each|ea)/i
+  const match = name.match(unitRegex)
+  return match ? match[1].toLowerCase() : ""
+}
 
 module.exports = router

@@ -130,4 +130,108 @@ cron.schedule("0 0 1 * *", async () => {
   }
 })
 
+// Update the cron job to fetch current prices weekly and update the database
+// Add a new cron job to fetch current prices from Walmart weekly
+cron.schedule("0 3 * * 1", async () => {
+  // Every Monday at 3 AM
+  console.log("Running weekly price update from Walmart...")
+  try {
+    const apiIntegration = require("../services/apiIntegration")
+
+    // Get all pantry items to update
+    const pantryItems = await PantryItem.find({}).limit(500) // Limit to avoid overloading
+
+    if (pantryItems.length === 0) {
+      console.log("No pantry items found to update prices")
+      return
+    }
+
+    console.log(`Found ${pantryItems.length} pantry items to update prices`)
+
+    // Group items by category for better search results
+    const itemsByCategory = {}
+
+    pantryItems.forEach((item) => {
+      if (!itemsByCategory[item.category]) {
+        itemsByCategory[item.category] = []
+      }
+      itemsByCategory[item.category].push(item)
+    })
+
+    let updatedCount = 0
+
+    // Process each category
+    for (const [category, items] of Object.entries(itemsByCategory)) {
+      // Process in smaller batches
+      const batchSize = 20
+      for (let i = 0; i < items.length; i += batchSize) {
+        const batch = items.slice(i, i + batchSize)
+
+        // Create search queries based on item names
+        for (const item of batch) {
+          try {
+            // Search for this specific item
+            const searchQuery = item.name.split(" ").slice(0, 3).join(" ") // Use first 3 words for better results
+            const products = await apiIntegration.searchWalmartProducts(searchQuery)
+
+            if (products && products.length > 0) {
+              // Find the best match
+              const bestMatch = products[0] // Simplification - in reality would use better matching logic
+
+              // Update the item with the new price
+              const storeService = require("../services/storeService")
+              const stores = await storeService.getStoresByName("Walmart")
+
+              if (stores && stores.length > 0) {
+                const pricePoint = {
+                  storeId: stores[0]._id,
+                  price: bestMatch.price,
+                  date: new Date(),
+                }
+
+                // Add to price history
+                item.priceHistory.push(pricePoint)
+
+                // Update current lowest price if applicable
+                if (!item.currentLowestPrice.price || bestMatch.price < item.currentLowestPrice.price) {
+                  item.currentLowestPrice = {
+                    price: bestMatch.price,
+                    storeId: stores[0]._id,
+                    lastUpdated: new Date(),
+                  }
+                }
+
+                // Update price range
+                const prices = item.priceHistory.map((p) => p.price)
+                item.priceRange = {
+                  min: Math.min(...prices),
+                  max: Math.max(...prices),
+                  period: 6,
+                }
+
+                await item.save()
+                updatedCount++
+              }
+            }
+          } catch (itemError) {
+            console.error(`Error updating price for item ${item.name}:`, itemError)
+          }
+
+          // Add a small delay to avoid rate limiting
+          await new Promise((resolve) => setTimeout(resolve, 500))
+        }
+
+        console.log(`Processed ${i + batch.length} of ${items.length} items in category ${category}`)
+      }
+    }
+
+    console.log(`Successfully updated prices for ${updatedCount} items from Walmart`)
+
+    // Update price trends after fetching new prices
+    await priceService.updatePriceTrends()
+  } catch (error) {
+    console.error("Error in weekly Walmart price update cron job:", error)
+  }
+})
+
 console.log("Cron jobs scheduled")
