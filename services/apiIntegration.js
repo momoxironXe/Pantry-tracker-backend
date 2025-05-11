@@ -20,7 +20,7 @@ const fetchAllStoreProducts = async (zipCode) => {
 
 // Modify the fetchWalmartProducts function to batch save products
 const fetchWalmartProducts = async () => {
-  try {
+
     console.log("Fetching Walmart products...");
 
     // Define search keywords for Walmart products - include produce keywords
@@ -61,10 +61,6 @@ const fetchWalmartProducts = async () => {
 
     console.log(`Fetched ${products.length} products from Walmart`);
     return products;
-  } catch (error) {
-    console.error("Error in fetchWalmartProducts:", error);
-    return [];
-  }
 };
 
 // Helper function to generate a random price between 1 and 15
