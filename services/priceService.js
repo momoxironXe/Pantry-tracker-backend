@@ -1,6 +1,7 @@
 const axios = require("axios")
 const PantryItem = require("../models/PantryItem")
 const Store = require("../models/Store")
+const User = require("../models/User")
 
 // Mock data for stores without direct API access
 const mockPriceData = {
@@ -300,7 +301,7 @@ const updatePriceHistory = async (priceData) => {
 }
 
 // Function to get top pantry items with price info
-const getTopPantryItems = async (zipCode, shoppingType, category = "Pantry", limit = 10, options = {}) => {
+const getTopPantryItemsWithPriceInfo = async (zipCode, shoppingType, category = "Pantry", limit = 10, options = {}) => {
   try {
     console.log(`Getting top ${category} items for ZIP: ${zipCode}, shopping type: ${shoppingType}`)
 
@@ -424,7 +425,7 @@ const getTopPantryItems = async (zipCode, shoppingType, category = "Pantry", lim
 }
 
 // Function to get buy alerts (best deals this week)
-const getBuyAlerts = async (zipCode, shoppingType, limit = 4) => {
+const getBuyAlertsWithDeals = async (zipCode, shoppingType, limit = 4) => {
   try {
     console.log(`Getting buy alerts for ZIP: ${zipCode}, shopping type: ${shoppingType}`)
 
@@ -434,8 +435,8 @@ const getBuyAlerts = async (zipCode, shoppingType, limit = 4) => {
     }
 
     // Get all pantry items that are recommended for buying
-    const pantryItems = await getTopPantryItems(zipCode, shoppingType, "Pantry", 20)
-    const produceItems = await getTopPantryItems(zipCode, shoppingType, "Produce", 20)
+    const pantryItems = await getTopPantryItemsWithPriceInfo(zipCode, shoppingType, "Pantry", 20)
+    const produceItems = await getTopPantryItemsWithPriceInfo(zipCode, shoppingType, "Produce", 20)
 
     // Combine and filter for buy recommendations
     const allItems = [...pantryItems, ...produceItems]
@@ -510,7 +511,7 @@ const getItemsWithPriceAlerts = async (category = null) => {
 }
 
 // Add method to get price trends for specific items
-const getPriceTrends = async (itemIds) => {
+const getPriceTrendsForItems = async (itemIds) => {
   try {
     if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
       return []
@@ -578,12 +579,448 @@ const getPriceTrends = async (itemIds) => {
   }
 }
 
+// Function to get top pantry items based on user preferences
+const getTopPantryItems = async (zipCode, shoppingStyle, category, limit = 10, options = {}) => {
+  try {
+    // Build query
+    const query = { category }
+
+    // Add additional filters based on options
+    if (options.isHealthy) query.isHealthy = true
+    if (options.isValuePick) query.isValuePick = true
+    if (options.isBulkOption) query.isBulkOption = true
+    if (options.isSeasonalProduce) query.isSeasonalProduce = true
+
+    // Get items from database
+    let items = await PantryItem.find(query).limit(limit)
+
+    // If no items found, create some mock data
+    if (items.length === 0) {
+      items = generateMockPantryItems(category, limit)
+    }
+
+    // Format items for frontend
+    return items.map((item) => formatPantryItem(item, shoppingStyle))
+  } catch (error) {
+    console.error(`Error getting top ${category} items:`, error)
+    return []
+  }
+}
+
+// Function to get buy alerts
+const getBuyAlerts = async (zipCode, shoppingStyle, limit = 4) => {
+  try {
+    // Get items with price drops or special deals
+    let items = await PantryItem.find({ isBuyRecommended: true }).limit(limit)
+
+    // If no items found, create some mock data
+    if (items.length === 0) {
+      items = generateMockBuyAlerts(limit)
+    }
+
+    // Format items for frontend
+    return items.map((item) => formatPantryItem(item, shoppingStyle, true))
+  } catch (error) {
+    console.error("Error getting buy alerts:", error)
+    return []
+  }
+}
+
+// Function to get price trends for items
+const getPriceTrends = async (itemIds) => {
+  try {
+    // Get items by IDs
+    const items = await PantryItem.find({ _id: { $in: itemIds } })
+
+    // Generate price trends for each item
+    return items.map((item) => {
+      // Generate historical price data if not available
+      const priceHistory = item.priceHistory || generatePriceHistory(item)
+
+      return {
+        id: item._id,
+        name: item.name,
+        currentPrice: item.currentLowestPrice?.price || 5.99,
+        priceHistory: {
+          weekly: priceHistory.weekly || generateWeeklyPriceData(item),
+          monthly: priceHistory.monthly || generateMonthlyPriceData(item),
+          threeMonth: priceHistory.threeMonth || generateThreeMonthPriceData(item),
+        },
+        priceChange: {
+          weekly: calculatePriceChange(priceHistory.weekly || generateWeeklyPriceData(item)),
+          monthly: calculatePriceChange(priceHistory.monthly || generateMonthlyPriceData(item)),
+          threeMonth: calculatePriceChange(priceHistory.threeMonth || generateThreeMonthPriceData(item)),
+        },
+        lowestPrice: findLowestPrice(priceHistory.threeMonth || generateThreeMonthPriceData(item)),
+        highestPrice: findHighestPrice(priceHistory.threeMonth || generateThreeMonthPriceData(item)),
+        storeName: item.currentLowestPrice?.storeName || "Various Stores",
+        seasonalLow: Math.random() > 0.7, // Randomly determine if it's a seasonal low
+        buyRecommendation: item.isBuyRecommended || Math.random() > 0.7,
+        buyRecommendationReason: item.buyRecommendationReason || generateBuyRecommendationReason(),
+      }
+    })
+  } catch (error) {
+    console.error("Error getting price trends:", error)
+    return []
+  }
+}
+
+// Function to get user's pantry items with price trends
+const getUserPantryWithTrends = async (userId) => {
+  try {
+    // Get user with populated pantry items
+    const user = await User.findById(userId).populate({
+      path: "pantryItems.itemId",
+      model: "PantryItem",
+    })
+
+    if (!user || !user.pantryItems || user.pantryItems.length === 0) {
+      return []
+    }
+
+    // Format pantry items with price trends
+    return user.pantryItems
+      .map((pantryItem) => {
+        const item = pantryItem.itemId
+        if (!item) return null
+
+        // Generate price history if not available
+        const priceHistory = item.priceHistory || generatePriceHistory(item)
+
+        return {
+          id: item._id,
+          name: item.name,
+          quantity: pantryItem.quantity || 1,
+          monthlyUsage: pantryItem.monthlyUsage || 1,
+          addedAt: pantryItem.addedAt || new Date(),
+          currentPrice: item.currentLowestPrice?.price || 5.99,
+          priceHistory: {
+            weekly: priceHistory.weekly || generateWeeklyPriceData(item),
+            monthly: priceHistory.monthly || generateMonthlyPriceData(item),
+            threeMonth: priceHistory.threeMonth || generateThreeMonthPriceData(item),
+          },
+          priceChange: {
+            weekly: calculatePriceChange(priceHistory.weekly || generateWeeklyPriceData(item)),
+            monthly: calculatePriceChange(priceHistory.monthly || generateMonthlyPriceData(item)),
+            threeMonth: calculatePriceChange(priceHistory.threeMonth || generateThreeMonthPriceData(item)),
+          },
+          lowestPrice: findLowestPrice(priceHistory.threeMonth || generateThreeMonthPriceData(item)),
+          highestPrice: findHighestPrice(priceHistory.threeMonth || generateThreeMonthPriceData(item)),
+          storeName: item.currentLowestPrice?.storeName || "Various Stores",
+        }
+      })
+      .filter(Boolean)
+  } catch (error) {
+    console.error("Error getting user pantry with trends:", error)
+    return []
+  }
+}
+
+// Helper function to format pantry item for frontend
+const formatPantryItem = (item, shoppingStyle, isBuyAlert = false) => {
+  // Generate a random price if not available
+  const price = item.currentLowestPrice?.price || (Math.random() * 10 + 1).toFixed(2)
+  const minPrice = price * 0.8
+  const maxPrice = price * 1.2
+
+  return {
+    id: item._id || `mock-${Math.random().toString(36).substring(2, 9)}`,
+    name: item.name,
+    description: item.description || `${item.name} - ${item.size || "Standard Size"}`,
+    category: item.category,
+    type: item.type || (Math.random() > 0.5 ? "Name Brand" : "Store Brand"),
+    size: item.size || "Standard",
+    unit: item.unit || "each",
+    imageUrl: item.imageUrl || `/placeholder.svg?height=200&width=200&query=grocery+${item.name.replace(/\s+/g, "+")}`,
+    lowestPrice: {
+      price: Number(price),
+      store: item.currentLowestPrice?.storeName || getRandomStore(),
+    },
+    priceRange: {
+      min: Number(minPrice.toFixed(2)),
+      max: Number(maxPrice.toFixed(2)),
+      period: "6 weeks",
+    },
+    isBuyRecommended: isBuyAlert || item.isBuyRecommended || false,
+    buyRecommendationReason: item.buyRecommendationReason || (isBuyAlert ? generateBuyRecommendationReason() : ""),
+    isHealthy: item.isHealthy || (shoppingStyle === "health" && Math.random() > 0.5),
+    isValuePick: item.isValuePick || (shoppingStyle === "value" && Math.random() > 0.5),
+    isBulkOption: item.isBulkOption || (shoppingStyle === "bulk" && Math.random() > 0.5),
+  }
+}
+
+// Helper function to generate mock pantry items
+const generateMockPantryItems = (category, limit) => {
+  const pantryItems = [
+    { name: "Brown Rice", category: "Pantry", size: "2 lb", unit: "bag", isHealthy: true, isBulkOption: true },
+    { name: "Black Beans", category: "Pantry", size: "15 oz", unit: "can", isHealthy: true, isValuePick: true },
+    { name: "Pasta", category: "Pantry", size: "16 oz", unit: "box", isValuePick: true },
+    { name: "Olive Oil", category: "Pantry", size: "16.9 fl oz", unit: "bottle", isHealthy: true },
+    { name: "Canned Tuna", category: "Pantry", size: "5 oz", unit: "can", isValuePick: true },
+    { name: "Peanut Butter", category: "Pantry", size: "16 oz", unit: "jar", isHealthy: true },
+    { name: "Oatmeal", category: "Pantry", size: "42 oz", unit: "container", isHealthy: true, isBulkOption: true },
+    { name: "Honey", category: "Pantry", size: "12 oz", unit: "bottle", isHealthy: true },
+    { name: "Flour", category: "Pantry", size: "5 lb", unit: "bag", isBulkOption: true },
+    { name: "Sugar", category: "Pantry", size: "4 lb", unit: "bag", isBulkOption: true },
+    { name: "Apples", category: "Produce", size: "1 lb", unit: "bag", isHealthy: true, isSeasonalProduce: true },
+    { name: "Bananas", category: "Produce", size: "1 bunch", unit: "each", isHealthy: true, isValuePick: true },
+    { name: "Spinach", category: "Produce", size: "10 oz", unit: "bag", isHealthy: true },
+    { name: "Carrots", category: "Produce", size: "1 lb", unit: "bag", isHealthy: true, isValuePick: true },
+    { name: "Potatoes", category: "Produce", size: "5 lb", unit: "bag", isValuePick: true, isBulkOption: true },
+    { name: "Onions", category: "Produce", size: "3 lb", unit: "bag", isValuePick: true },
+    { name: "Tomatoes", category: "Produce", size: "1 lb", unit: "each", isHealthy: true, isSeasonalProduce: true },
+    { name: "Avocados", category: "Produce", size: "each", unit: "each", isHealthy: true },
+    { name: "Broccoli", category: "Produce", size: "1 head", unit: "each", isHealthy: true },
+    { name: "Bell Peppers", category: "Produce", size: "each", unit: "each", isHealthy: true, isSeasonalProduce: true },
+  ]
+
+  // Filter by category and limit
+  return pantryItems
+    .filter((item) => item.category === category)
+    .slice(0, limit)
+    .map((item) => ({
+      ...item,
+      _id: `mock-${Math.random().toString(36).substring(2, 9)}`,
+      description: `${item.name} - ${item.size}`,
+      type: Math.random() > 0.5 ? "Name Brand" : "Store Brand",
+      imageUrl: `/placeholder.svg?height=200&width=200&query=grocery+${item.name.replace(/\s+/g, "+")}`,
+      currentLowestPrice: {
+        price: (Math.random() * 10 + 1).toFixed(2),
+        storeName: getRandomStore(),
+      },
+      isBuyRecommended: Math.random() > 0.7,
+      buyRecommendationReason: Math.random() > 0.7 ? generateBuyRecommendationReason() : "",
+    }))
+}
+
+// Helper function to generate mock buy alerts
+const generateMockBuyAlerts = (limit) => {
+  const buyAlerts = [
+    {
+      name: "Organic Chicken",
+      category: "Meat",
+      size: "1 lb",
+      unit: "package",
+      isHealthy: true,
+      currentLowestPrice: { price: 4.99, storeName: "Whole Foods" },
+      category: "Meat",
+      size: "1 lb",
+      unit: "package",
+      isHealthy: true,
+      currentLowestPrice: { price: 4.99, storeName: "Whole Foods" },
+      buyRecommendationReason: "Price dropped 20% this week!",
+    },
+    {
+      name: "Almond Milk",
+      category: "Dairy",
+      size: "64 oz",
+      unit: "carton",
+      isHealthy: true,
+      currentLowestPrice: { price: 2.99, storeName: "Target" },
+      buyRecommendationReason: "Buy one get one free this weekend!",
+    },
+    {
+      name: "Frozen Berries",
+      category: "Frozen",
+      size: "16 oz",
+      unit: "bag",
+      isHealthy: true,
+      isBulkOption: true,
+      currentLowestPrice: { price: 3.49, storeName: "Kroger" },
+      buyRecommendationReason: "Lowest price in 3 months!",
+    },
+    {
+      name: "Pasta Sauce",
+      category: "Pantry",
+      size: "24 oz",
+      unit: "jar",
+      isValuePick: true,
+      currentLowestPrice: { price: 1.99, storeName: "Aldi" },
+      buyRecommendationReason: "Stock up price - 30% off!",
+    },
+    {
+      name: "Coffee Beans",
+      category: "Pantry",
+      size: "12 oz",
+      unit: "bag",
+      isValuePick: true,
+      currentLowestPrice: { price: 6.99, storeName: "Trader Joe's" },
+      buyRecommendationReason: "Limited time sale - ends Sunday!",
+    },
+    {
+      name: "Greek Yogurt",
+      category: "Dairy",
+      size: "32 oz",
+      unit: "tub",
+      isHealthy: true,
+      currentLowestPrice: { price: 3.99, storeName: "Walmart" },
+      buyRecommendationReason: "Clearance price - 25% off!",
+    },
+  ]
+
+  // Limit and format
+  return buyAlerts.slice(0, limit).map((item) => ({
+    ...item,
+    _id: `mock-${Math.random().toString(36).substring(2, 9)}`,
+    description: `${item.name} - ${item.size}`,
+    type: Math.random() > 0.5 ? "Name Brand" : "Store Brand",
+    imageUrl: `/placeholder.svg?height=200&width=200&query=grocery+${item.name.replace(/\s+/g, "+")}`,
+    isBuyRecommended: true,
+  }))
+}
+
+// Helper function to generate price history
+const generatePriceHistory = (item) => {
+  return {
+    weekly: generateWeeklyPriceData(item),
+    monthly: generateMonthlyPriceData(item),
+    threeMonth: generateThreeMonthPriceData(item),
+  }
+}
+
+// Helper function to generate weekly price data
+const generateWeeklyPriceData = (item) => {
+  const basePrice = item.currentLowestPrice?.price || 5.99
+  const today = new Date()
+  const data = []
+
+  // Generate data for the past 7 days
+  for (let i = 6; i >= 0; i--) {
+    const date = new Date(today)
+    date.setDate(date.getDate() - i)
+
+    // Add some random variation to the price
+    const variation = (Math.random() * 0.2 - 0.1) * basePrice
+    const price = Number((basePrice + variation).toFixed(2))
+
+    data.push({
+      date: date.toISOString(),
+      price,
+      storeName: getRandomStore(),
+    })
+  }
+
+  return data
+}
+
+// Helper function to generate monthly price data
+const generateMonthlyPriceData = (item) => {
+  const basePrice = item.currentLowestPrice?.price || 5.99
+  const today = new Date()
+  const data = []
+
+  // Generate data for the past 30 days (weekly points)
+  for (let i = 4; i >= 0; i--) {
+    const date = new Date(today)
+    date.setDate(date.getDate() - i * 7)
+
+    // Add some random variation to the price
+    const variation = (Math.random() * 0.3 - 0.15) * basePrice
+    const price = Number((basePrice + variation).toFixed(2))
+
+    data.push({
+      date: date.toISOString(),
+      price,
+      storeName: getRandomStore(),
+    })
+  }
+
+  return data
+}
+
+// Helper function to generate three-month price data
+const generateThreeMonthPriceData = (item) => {
+  const basePrice = item.currentLowestPrice?.price || 5.99
+  const today = new Date()
+  const data = []
+
+  // Generate data for the past 90 days (bi-weekly points)
+  for (let i = 6; i >= 0; i--) {
+    const date = new Date(today)
+    date.setDate(date.getDate() - i * 14)
+
+    // Add some random variation to the price
+    const variation = (Math.random() * 0.4 - 0.2) * basePrice
+    const price = Number((basePrice + variation).toFixed(2))
+
+    data.push({
+      date: date.toISOString(),
+      price,
+      storeName: getRandomStore(),
+    })
+  }
+
+  return data
+}
+
+// Helper function to calculate price change percentage
+const calculatePriceChange = (priceData) => {
+  if (!priceData || priceData.length < 2) return 0
+
+  const oldestPrice = priceData[0].price
+  const newestPrice = priceData[priceData.length - 1].price
+
+  return Number((((newestPrice - oldestPrice) / oldestPrice) * 100).toFixed(1))
+}
+
+// Helper function to find lowest price in price data
+const findLowestPrice = (priceData) => {
+  if (!priceData || priceData.length === 0) return 0
+
+  return Math.min(...priceData.map((data) => data.price))
+}
+
+// Helper function to find highest price in price data
+const findHighestPrice = (priceData) => {
+  if (!priceData || priceData.length === 0) return 0
+
+  return Math.max(...priceData.map((data) => data.price))
+}
+
+// Helper function to get a random store name
+const getRandomStore = () => {
+  const stores = [
+    "Walmart",
+    "Target",
+    "Kroger",
+    "Costco",
+    "Whole Foods",
+    "Safeway",
+    "Trader Joe's",
+    "Publix",
+    "Albertsons",
+    "Aldi",
+  ]
+
+  return stores[Math.floor(Math.random() * stores.length)]
+}
+
+// Helper function to generate a buy recommendation reason
+const generateBuyRecommendationReason = () => {
+  const reasons = [
+    "Price dropped 15% this week!",
+    "Lowest price in 3 months!",
+    "Buy one get one free this weekend!",
+    "Stock up price - 20% off!",
+    "Limited time sale - ends Sunday!",
+    "Clearance price - 25% off!",
+    "Seasonal low price!",
+    "Price match guarantee!",
+  ]
+
+  return reasons[Math.floor(Math.random() * reasons.length)]
+}
+
 module.exports = {
   fetchStorePrices,
   updatePriceHistory,
-  getTopPantryItems,
-  getBuyAlerts,
   updatePriceTrends,
   getItemsWithPriceAlerts,
-  getPriceTrends,
+  getUserPantryWithTrends,
+  getTopPantryItems: getTopPantryItems,
+  getBuyAlerts: getBuyAlerts,
+  getPriceTrends: getPriceTrends,
+  getPriceTrendsForItems,
+  getBuyAlertsWithDeals,
+  getTopPantryItemsWithPriceInfo,
 }
