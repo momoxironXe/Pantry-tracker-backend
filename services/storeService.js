@@ -2,7 +2,7 @@ const axios = require("axios")
 const Store = require("../models/Store")
 
 // Get nearby stores based on zip code using Google Places API
-const getNearbyStores = async (zipCode, radius = 3000) => {
+const getNearbyStores = async (zipCode, radius = 32000) => {
   try {
     // First, convert zip code to coordinates using Google Geocoding API
     const geocodeResponse = await axios.get(
