@@ -1,4 +1,6 @@
 const express = require("express")
+const bcrypt = require("bcryptjs")
+const jwt = require("jsonwebtoken")
 const User = require("../models/User")
 const DataFetchStatus = require("../models/DataFetchStatus")
 const auth = require("../middleware/auth")
@@ -6,269 +8,61 @@ const storeService = require("../services/storeService")
 const priceService = require("../services/priceService")
 const apiIntegration = require("../services/apiIntegration")
 const PantryItem = require("../models/PantryItem")
-const EmailVerification = require("../models/EmailVerification")
-const SmsVerification = require("../models/SmsVerification")
+const EmailVerification = require("../models/EmailVerification") // Import EmailVerification model
+const SmsVerification = require("../models/SmsVerification") // Import SmsVerification model
 const emailService = require("../services/emailService")
 const smsService = require("../services/smsService")
-const mongoose = require("mongoose")
 const router = express.Router()
 
-// Add email verification endpoints
-router.post("/verify-email", async (req, res) => {
-  try {
-    const { email, code } = req.body
-
-    if (!email || !code) {
-      return res.status(400).json({ message: "Email and verification code are required" })
-    }
-
-    // Find user by email
-    const user = await User.findOne({ email })
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
-    }
-
-    // Find verification record
-    const verification = await EmailVerification.findOne({
-      email: email.toLowerCase(),
-      verificationCode: code,
-    })
-
-    if (!verification) {
-      return res.status(400).json({ message: "Invalid verification code" })
-    }
-
-    if (verification.isExpired()) {
-      return res.status(400).json({ message: "Verification code has expired" })
-    }
-
-    // Mark as verified
-    verification.verified = true
-    await verification.save()
-
-    // Update user
-    user.emailVerified = true
-    await user.save()
-
-    // Generate a token for the frontend to use
-    const token = await user.generateAuthToken()
-
-    // Create or update data fetch status
-    let dataFetchStatus = await DataFetchStatus.findOne({ userId: user._id })
-
-    if (!dataFetchStatus) {
-      dataFetchStatus = new DataFetchStatus({
-        userId: user._id,
-        status: "pending",
-        progress: 0,
-        message: "Initializing your account...",
-      })
-      await dataFetchStatus.save()
-    }
-
-    // Start the background data fetch process
-    fetchDataInBackground(user._id, user.zipCode, user.shoppingStyle)
-
-    res.json({
-      message: "Email verified successfully",
-      token,
-      user: {
-        _id: user._id,
-        email: user.email,
-        emailVerified: true,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        fullName: `${user.firstName} ${user.lastName}`,
-        zipCode: user.zipCode,
-        shoppingStyle: user.shoppingStyle,
-      },
-    })
-  } catch (error) {
-    console.error("Error verifying email:", error)
-    res.status(500).json({ message: "Server error", error: error.message })
-  }
-})
-
-// Check if email is verified
-router.post("/check-email-verification", async (req, res) => {
-  try {
-    const { email } = req.body
-
-    if (!email) {
-      return res.status(400).json({ message: "Email is required" })
-    }
-
-    // Find user by email
-    const user = await User.findOne({ email })
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
-    }
-
-    res.json({ verified: user.emailVerified })
-  } catch (error) {
-    console.error("Error checking email verification:", error)
-    res.status(500).json({ message: "Server error", error: error.message })
-  }
-})
-
-router.post("/resend-verification", async (req, res) => {
-  try {
-    const { email } = req.body
-
-    if (!email) {
-      return res.status(400).json({ message: "Email is required" })
-    }
-
-    // Find user by email
-    const user = await User.findOne({ email })
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
-    }
-
-    // Generate new verification code
-    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString()
-
-    // Delete any existing verification records for this email
-    await EmailVerification.deleteMany({ email: email.toLowerCase() })
-
-    // Create new verification record
-    const emailVerification = new EmailVerification({
-      userId: user._id,
-      email: email.toLowerCase(),
-      verificationCode,
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
-    })
-
-    await emailVerification.save()
-
-    // Send verification email
-    const result = await emailService.sendVerificationEmail(email, verificationCode, user.firstName)
-
-    if (!result.success) {
-      console.error("Failed to send verification email:", result.error)
-    }
-
-    // For development, include the verification code in the response
-    const responseData = { message: "Verification email sent" }
-    if (process.env.NODE_ENV === "development") {
-      responseData.code = verificationCode
-    }
-
-    res.json(responseData)
-  } catch (error) {
-    console.error("Error resending verification:", error)
-    res.status(500).json({ message: "Server error", error: error.message })
-  }
-})
-
-// Add phone verification endpoints
-router.post("/verify-phone", auth, async (req, res) => {
-  try {
-    const { phoneNumber, code } = req.body
-
-    if (!phoneNumber || !code) {
-      return res.status(400).json({ message: "Phone number and verification code are required" })
-    }
-
-    // Find verification record
-    const verification = await SmsVerification.findOne({
-      userId: req.user._id,
-      phoneNumber,
-      verificationCode: code,
-      verified: false,
-    })
-
-    if (!verification) {
-      return res.status(400).json({ message: "Invalid verification code" })
-    }
-
-    if (verification.isExpired()) {
-      return res.status(400).json({ message: "Verification code has expired" })
-    }
-
-    // Mark as verified
-    verification.verified = true
-    await verification.save()
-
-    // Update user
-    req.user.phoneNumber = phoneNumber
-    req.user.phoneVerified = true
-    await req.user.save()
-
-    res.json({ message: "Phone number verified successfully" })
-  } catch (error) {
-    console.error("Error verifying phone:", error)
-    res.status(500).json({ message: "Server error", error: error.message })
-  }
-})
-
-router.post("/send-phone-verification", auth, async (req, res) => {
-  try {
-    const { phoneNumber } = req.body
-
-    if (!phoneNumber) {
-      return res.status(400).json({ message: "Phone number is required" })
-    }
-
-    // Send verification SMS
-    const sent = await smsService.sendVerificationSms(req.user._id, phoneNumber)
-
-    if (!sent) {
-      throw new Error("Failed to send verification SMS")
-    }
-
-    res.json({ message: "Verification SMS sent" })
-  } catch (error) {
-    console.error("Error sending phone verification:", error)
-    res.status(500).json({ message: "Server error", error: error.message })
-  }
-})
-
-// Register a new user
+// User registration
 router.post("/register", async (req, res) => {
   try {
     const { firstName, lastName, email, password, zipCode, shoppingStyle, phoneNumber } = req.body
 
     // Check if user already exists
-    const existingUser = await User.findOne({ email: email.toLowerCase() })
-    if (existingUser) {
+    let user = await User.findOne({ email })
+    if (user) {
       return res.status(400).json({ message: "User already exists with this email" })
     }
 
     // Create new user
-    const user = new User({
+    user = new User({
       firstName,
       lastName,
-      email: email.toLowerCase(),
+      email,
       password,
       zipCode,
-      shoppingStyle: shoppingStyle || "budget",
+      shoppingStyle: shoppingStyle || "value",
       phoneNumber: phoneNumber || undefined,
-      emailVerified: false,
+      preferences: {
+        notificationPreferences: {
+          email: {
+            priceAlerts: true,
+            weeklyDigest: true,
+            specialDeals: true,
+          },
+          sms: {
+            priceAlerts: !!phoneNumber,
+            specialDeals: !!phoneNumber,
+          },
+        },
+        alertCategories: ["All"],
+      },
     })
+
+    // Hash password
+    const salt = await bcrypt.genSalt(10)
+    user.password = await bcrypt.hash(password, salt)
 
     // Save user
     await user.save()
 
-    // Generate auth token
-    const token = await user.generateAuthToken()
-
-    // Create a data fetch status record
-    const dataFetchStatus = new DataFetchStatus({
-      userId: user._id,
-      status: "pending",
-      progress: 0,
-      message: "Account created. Waiting for email verification...",
-    })
-    await dataFetchStatus.save()
-
-    // Generate verification code
+    // Create verification code
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString()
-
-    // Create verification record
+    console.log("Generated verification code:", verificationCode)
     const emailVerification = new EmailVerification({
       userId: user._id,
-      email: email.toLowerCase(),
+      email,
       verificationCode,
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
     })
@@ -276,243 +70,115 @@ router.post("/register", async (req, res) => {
     await emailVerification.save()
 
     // Send verification email
-    const emailResult = await emailService.sendVerificationEmail(email, verificationCode, firstName)
+    await emailService.sendVerificationEmail(email, verificationCode, user.firstName)
 
-    if (!emailResult.success) {
-      console.error("Failed to send verification email:", emailResult.error)
+    // Create token
+    const payload = {
+      user: {
+        id: user._id,
+      },
     }
 
-    // Response object
-    const responseData = {
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "1h" })
+
+    // Start the data loading process in the background
+    startDataLoadingProcess(user._id, zipCode)
+
+    // Return token and user data
+    res.status(201).json({
+      message: "User registered successfully. Please verify your email.",
+      token,
       user: {
         _id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
-        fullName: `${user.firstName} ${user.lastName}`,
         email: user.email,
         zipCode: user.zipCode,
         shoppingStyle: user.shoppingStyle,
         emailVerified: user.emailVerified,
       },
-      token,
-      dataFetchStatus: "pending", // Let the frontend know data fetching is in progress
-      emailVerificationRequired: true,
-      emailSent: emailResult.success,
-    }
-
-    // For development, include the verification code in the response
-    if (process.env.NODE_ENV === "development") {
-      responseData.verificationCode = verificationCode
-    }
-
-    // Respond immediately with user data and token
-    res.status(201).json(responseData)
+      verificationCode: process.env.NODE_ENV === "development" ? verificationCode : undefined,
+    })
   } catch (error) {
-    console.error("Error registering user:", error)
+    console.error("Registration error:", error)
     res.status(500).json({ message: "Server error", error: error.message })
   }
 })
 
-// Background function to fetch data
-async function fetchDataInBackground(userId, zipCode, shoppingStyle) {
+// Start data loading process in the background
+const startDataLoadingProcess = async (userId, zipCode) => {
   try {
-    console.log(`Starting background data fetch for user ${userId}...`)
-
-    // Update status to in progress
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        status: "pending",
-        progress: 5,
-        message: "Starting data fetch process...",
-      },
-    )
-
-    // Step 1: Fetch nearby stores based on zip code (20%)
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 10,
-        message: "Fetching nearby stores...",
-      },
-    )
-
-    console.log(`Fetching stores for zip code ${zipCode}...`)
-    const stores = await storeService.getNearbyStores(zipCode)
-    console.log(`Found ${stores.length} stores for zip code ${zipCode}`)
-
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 20,
-        message: "Stores data fetched successfully",
-      },
-    )
-
-    // Step 2: Fetch product data from Walmart (40%)
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 25,
-        message: "Fetching product data...",
-      },
-    )
-
-    console.log("Fetching product data from Walmart...")
-    const products = await apiIntegration.fetchAllStoreProducts(zipCode)
-
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 40,
-        message: "Product data fetched successfully",
-      },
-    )
-
-    // Step 3: Save products to database (60%)
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 45,
-        message: "Saving products to database...",
-      },
-    )
-
-    // Save products to database in a batch
-    if (products.length > 0) {
-      await apiIntegration.saveProductsToDatabase(products)
-      console.log(`Saved ${products.length} products to database`)
-    } else {
-      console.log("No products fetched from APIs, checking for existing products...")
-
-      // Check if we have pantry items in the database
-      const pantryItemCount = await PantryItem.countDocuments()
-      console.log(`Found ${pantryItemCount} existing pantry items in database`)
-
-      if (pantryItemCount === 0) {
-        // Update status to failed
-        await DataFetchStatus.findOneAndUpdate(
-          { userId },
-          {
-            status: "failed",
-            completedAt: new Date(),
-            error: "Unable to fetch product data and no existing products in database.",
-          },
-        )
-        console.error("Data fetch failed: No products available")
-        return
-      }
+    // Create a global object to track loading progress for this user
+    if (!global.dataLoadingStatus) {
+      global.dataLoadingStatus = {}
     }
 
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 60,
-        message: "Products saved to database",
-      },
-    )
+    global.dataLoadingStatus[userId] = {
+      progress: 0,
+      message: "Initializing your account...",
+      completed: false,
+      error: null,
+    }
 
-    // Step 4: Generate historical price data (80%)
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 65,
-        message: "Generating historical price data...",
-      },
-    )
+    // Step 1: Fetch products from Walmart (20%)
+    global.dataLoadingStatus[userId].message = "Fetching product data..."
+    global.dataLoadingStatus[userId].progress = 10
+
+    const products = await apiIntegration.fetchWalmartProducts()
+
+    global.dataLoadingStatus[userId].progress = 20
+
+    // Step 2: Save products to database (40%)
+    global.dataLoadingStatus[userId].message = "Saving product data..."
+    global.dataLoadingStatus[userId].progress = 30
+
+    await apiIntegration.saveProductsToDatabase(products)
+
+    global.dataLoadingStatus[userId].progress = 40
+
+    // Step 3: Generate historical price data (70%)
+    global.dataLoadingStatus[userId].message = "Generating price history..."
+    global.dataLoadingStatus[userId].progress = 50
 
     await generateHistoricalPriceData()
 
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 80,
-        message: "Historical price data generated",
-      },
-    )
+    global.dataLoadingStatus[userId].progress = 70
 
-    // Step 5: Set up user's pantry with default items (90%)
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 85,
-        message: "Setting up your pantry...",
-      },
-    )
+    // Step 4: Set up user's pantry with default items (90%)
+    global.dataLoadingStatus[userId].message = "Setting up your pantry..."
+    global.dataLoadingStatus[userId].progress = 80
 
     await setupUserPantry(userId)
 
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 90,
-        message: "Pantry setup complete",
-      },
-    )
+    global.dataLoadingStatus[userId].progress = 90
 
-    // Get pantry items
-    const pantryItems = await PantryItem.find({ category: "Pantry" }).limit(10)
-    const produceItems = await PantryItem.find({ category: "Produce" }).limit(10)
+    // Step 5: Complete setup (100%)
+    global.dataLoadingStatus[userId].message = "Setup complete!"
+    global.dataLoadingStatus[userId].progress = 100
+    global.dataLoadingStatus[userId].completed = true
 
-    // Fetch prices for these items from the top stores
-    if (stores.length >= 3) {
-      const topStores = stores.slice(0, 3)
+    console.log(`Data loading completed for user ${userId}`)
 
-      console.log(
-        `Fetching prices for ${pantryItems.length} pantry items and ${produceItems.length} produce items from ${topStores.length} stores...`,
-      )
-
-      // Batch price updates
-      const allPriceUpdates = []
-
-      for (const store of topStores) {
-        // Fetch prices for pantry items
-        const pantryPrices = await priceService.fetchStorePrices(store._id, pantryItems)
-        allPriceUpdates.push(...pantryPrices)
-
-        // Fetch prices for produce items
-        const producePrices = await priceService.fetchStorePrices(store._id, produceItems)
-        allPriceUpdates.push(...producePrices)
+    // Clean up after some time
+    setTimeout(() => {
+      if (global.dataLoadingStatus && global.dataLoadingStatus[userId]) {
+        delete global.dataLoadingStatus[userId]
       }
-
-      // Update all price history in one batch
-      if (allPriceUpdates.length > 0) {
-        await priceService.updatePriceHistory(allPriceUpdates)
-        console.log(`Updated ${allPriceUpdates.length} price points in batch`)
-      }
-    }
-
-    // Update the data fetch status to completed
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        status: "completed",
-        progress: 100,
-        message: "Setup complete! You can now sign in.",
-        completedAt: new Date(),
-      },
-    )
-
-    console.log(`Background data fetch completed for user ${userId}`)
+    }, 3600000) // Remove after 1 hour
   } catch (error) {
-    console.error(`Error in background data fetch for user ${userId}:`, error)
-
-    // Update status to failed
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        status: "failed",
-        completedAt: new Date(),
-        error: error.message,
-      },
-    )
+    console.error(`Error in data loading process for user ${userId}:`, error)
+    if (global.dataLoadingStatus && global.dataLoadingStatus[userId]) {
+      global.dataLoadingStatus[userId].error = error.message
+      global.dataLoadingStatus[userId].completed = true // Mark as completed even on error
+    }
   }
 }
 
 // Generate historical price data for all products
-async function generateHistoricalPriceData() {
+const generateHistoricalPriceData = async () => {
   try {
-    const items = await PantryItem.find({}).limit(100) // Limit to 100 items for performance
+    const PantryItem = require("../models/PantryItem")
+    const items = await PantryItem.find({})
 
     console.log(`Generating historical price data for ${items.length} items...`)
 
@@ -530,7 +196,7 @@ async function generateHistoricalPriceData() {
       const now = new Date()
 
       // Get store ID
-      const storeId = item.currentLowestPrice?.storeId || new mongoose.Types.ObjectId()
+      const storeId = item.currentLowestPrice?.storeId
 
       for (let i = 0; i < 12; i++) {
         // Create a date for each week going back
@@ -561,7 +227,7 @@ async function generateHistoricalPriceData() {
       }
 
       // Add the price history to the item
-      item.priceHistory = [...priceHistory, ...(item.priceHistory || [])]
+      item.priceHistory = [...priceHistory, ...item.priceHistory]
 
       // Update price range
       const prices = item.priceHistory.map((p) => p.price)
@@ -582,16 +248,19 @@ async function generateHistoricalPriceData() {
 }
 
 // Set up user's pantry with default items
-async function setupUserPantry(userId) {
+const setupUserPantry = async (userId) => {
   try {
+    const User = require("../models/User")
+    const PantryItem = require("../models/PantryItem")
+
     // Get some popular pantry items
-    const popularItems = await PantryItem.find({}).limit(10)
+    const popularItems = await PantryItem.find({}).sort({ "currentLowestPrice.lastUpdated": -1 }).limit(10)
 
     // Add items to user's pantry
     const pantryItems = popularItems.map((item) => ({
       itemId: item._id,
       quantity: Math.floor(Math.random() * 3) + 1, // 1-3 items
-      monthlyUsage: 1,
+      unit: item.unit || "item",
       addedAt: new Date(),
     }))
 
@@ -607,187 +276,169 @@ async function setupUserPantry(userId) {
   }
 }
 
-// New endpoint to check data fetch status
-router.get("/data-fetch-status", auth, async (req, res) => {
+// Endpoint to check data loading status
+router.get("/data-loading-status/:userId", async (req, res) => {
   try {
-    const status = await DataFetchStatus.findOne({ userId: req.user._id })
+    const { userId } = req.params
 
-    if (!status) {
-      return res.status(404).json({ message: "Status not found" })
+    if (!global.dataLoadingStatus || !global.dataLoadingStatus[userId]) {
+      return res.status(200).json({
+        progress: 100,
+        message: "Setup complete!",
+        completed: true,
+      })
     }
 
-    res.json({
-      status: status.status,
-      progress: status.progress,
-      message: status.message,
-      error: status.error,
+    res.status(200).json({
+      progress: global.dataLoadingStatus[userId].progress,
+      message: global.dataLoadingStatus[userId].message,
+      completed: global.dataLoadingStatus[userId].completed,
+      error: global.dataLoadingStatus[userId].error,
     })
   } catch (error) {
-    console.error("Error getting data fetch status:", error)
+    console.error("Error checking data loading status:", error)
     res.status(500).json({ message: "Server error", error: error.message })
   }
 })
 
-// Add this new endpoint to check data fetch status by email
-router.post("/data-fetch-status-by-email", async (req, res) => {
+// Verify email
+router.post("/verify-email", async (req, res) => {
   try {
-    const { email } = req.body
+    const { email, code } = req.body
 
-    if (!email) {
-      return res.status(400).json({ message: "Email is required" })
+    // Find verification record
+    const verification = await EmailVerification.findOne({ email, code })
+
+    if (!verification) {
+      return res.status(400).json({ message: "Invalid verification code" })
     }
 
-    // Find the user by email
-    const user = await User.findOne({ email: email.toLowerCase() })
+    // Check if code is expired
+    if (verification.expiresAt < Date.now()) {
+      return res.status(400).json({ message: "Verification code has expired" })
+    }
+
+    // Update user
+    const user = await User.findByIdAndUpdate(verification.userId, { emailVerified: true }, { new: true }).select(
+      "-password",
+    )
 
     if (!user) {
       return res.status(404).json({ message: "User not found" })
     }
 
-    // Find the data fetch status for this user
-    const status = await DataFetchStatus.findOne({ userId: user._id })
+    // Delete verification record
+    await EmailVerification.deleteOne({ _id: verification._id })
 
-    if (!status) {
-      // If no status exists, we'll assume it's completed
-      return res.json({
-        status: "completed",
-        progress: 100,
-        message: "Setup complete!",
-      })
+    // Create token
+    const payload = {
+      user: {
+        id: user._id,
+      },
     }
 
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "7d" })
+
     res.json({
-      status: status.status,
-      progress: status.progress,
-      message: status.message,
-      error: status.error,
+      message: "Email verified successfully",
+      token,
+      user,
     })
   } catch (error) {
-    console.error("Error getting data fetch status by email:", error)
+    console.error("Verification error:", error)
     res.status(500).json({ message: "Server error", error: error.message })
   }
 })
 
-// Get data fetch status by user ID
-router.get("/data-fetch-status/:userId", async (req, res) => {
+// Resend verification code
+router.post("/resend-verification", async (req, res) => {
   try {
-    const { userId } = req.params
+    const { email } = req.body
 
-    if (!mongoose.Types.ObjectId.isValid(userId)) {
-      return res.status(400).json({ message: "Invalid user ID" })
+    // Find user
+    const user = await User.findOne({ email })
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
     }
 
-    const status = await DataFetchStatus.findOne({ userId })
+    // Delete existing verification records
+    await EmailVerification.deleteMany({ userId: user._id })
 
-    if (!status) {
-      return res.json({
-        status: "completed",
-        progress: 100,
-        message: "Setup complete!",
-      })
-    }
+    // Create new verification code
+    const code = Math.floor(100000 + Math.random() * 900000).toString()
+    const emailVerification = new EmailVerification({
+      userId: user._id,
+      email,
+      code,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+    })
+
+    await emailVerification.save()
+
+    // Send verification email
+    await emailService.sendVerificationEmail(email, code, user.firstName)
 
     res.json({
-      status: status.status,
-      progress: status.progress,
-      message: status.message,
-      error: status.error,
+      message: "Verification code resent successfully",
+      code: process.env.NODE_ENV === "development" ? code : undefined,
     })
   } catch (error) {
-    console.error("Error getting data fetch status by user ID:", error)
+    console.error("Resend verification error:", error)
     res.status(500).json({ message: "Server error", error: error.message })
   }
 })
 
-// Login user - simplified to only return user data and token
+// User login
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body
 
-    // Find user by credentials
-    const user = await User.findOne({ email: email.toLowerCase() })
+    // Find user
+    const user = await User.findOne({ email })
+    console.log("User found:", user)
 
     if (!user) {
-      return res.status(400).json({ message: "Invalid login credentials" })
+      return res.status(400).json({ message: "Invalid credentials" })
     }
 
     // Check password
-    const isMatch = await user.comparePassword(password)
+    const isMatch = await bcrypt.compare(password, user.password)
 
     if (!isMatch) {
-      return res.status(400).json({ message: "Invalid login credentials" })
+      console.log("Password mismatch")
+      return res.status(400).json({ message: "Invalid credentials" })
     }
 
     // Check if email is verified
-    if (!user.emailVerified) {
-      // Generate new verification code
-      const verificationCode = Math.floor(100000 + Math.random() * 900000).toString()
+    // if (!user.emailVerified) {
+    //   return res.status(400).json({ message: "Please verify your email before logging in" })
+    // }
 
-      // Delete any existing verification records for this email
-      await EmailVerification.deleteMany({ email: email.toLowerCase() })
-
-      // Create new verification record
-      const emailVerification = new EmailVerification({
-        userId: user._id,
-        email: email.toLowerCase(),
-        verificationCode,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
-      })
-
-      await emailVerification.save()
-
-      // Send a new verification email
-      await emailService.sendVerificationEmail(email, verificationCode, user.firstName)
-
-      return res.status(403).json({
-        message: "Email not verified. A new verification code has been sent to your email.",
-        emailVerificationRequired: true,
-        verificationCode: process.env.NODE_ENV === "development" ? verificationCode : undefined,
-      })
+    // Create token
+    const payload = {
+      user: {
+        id: user._id,
+      },
     }
 
-    // Generate auth token
-    const token = await user.generateAuthToken()
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "7d" })
 
-    // Check if data fetch is complete
-    const dataFetchStatus = await DataFetchStatus.findOne({ userId: user._id })
-    const fetchStatus = dataFetchStatus ? dataFetchStatus.status : "completed"
-    const fetchProgress = dataFetchStatus ? dataFetchStatus.progress : 100
-    const fetchMessage = dataFetchStatus ? dataFetchStatus.message : "Setup complete!"
-
-    // Return only user data and token
     res.json({
+      token,
       user: {
         _id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
-        fullName: `${user.firstName} ${user.lastName}`,
+        fullName: user.fullName,
         email: user.email,
         zipCode: user.zipCode,
         shoppingStyle: user.shoppingStyle,
         emailVerified: user.emailVerified,
       },
-      token,
-      dataFetchStatus: fetchStatus,
-      dataFetchProgress: fetchProgress,
-      dataFetchMessage: fetchMessage,
     })
   } catch (error) {
-    console.error("Error logging in:", error)
-    res.status(400).json({ message: "Invalid login credentials" })
-  }
-})
-
-// Logout user
-router.post("/logout", auth, async (req, res) => {
-  try {
-    // Remove the current token
-    req.user.tokens = req.user.tokens.filter((token) => token.token !== req.token)
-    await req.user.save()
-
-    res.json({ message: "Logged out successfully" })
-  } catch (error) {
-    console.error("Error logging out:", error)
+    console.error("Login error:", error)
     res.status(500).json({ message: "Server error", error: error.message })
   }
 })
@@ -795,80 +446,156 @@ router.post("/logout", auth, async (req, res) => {
 // Get user profile
 router.get("/profile", auth, async (req, res) => {
   try {
-    res.json(req.user)
+    const user = await User.findById(req.user.id).select("-password")
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    res.json(user)
   } catch (error) {
-    console.error("Error getting profile:", error)
+    console.error("Profile error:", error)
     res.status(500).json({ message: "Server error", error: error.message })
   }
 })
 
 // Update user profile
-router.patch("/profile", auth, async (req, res) => {
+router.put("/profile", auth, async (req, res) => {
   try {
-    const updates = req.body
-    const allowedUpdates = ["firstName", "lastName", "zipCode", "shoppingType", "preferences"]
-    const isValidOperation = Object.keys(updates).every((update) => allowedUpdates.includes(update))
+    const { firstName, lastName, zipCode, shoppingStyle, phoneNumber, preferences } = req.body
 
-    if (!isValidOperation) {
-      return res.status(400).json({ message: "Invalid updates" })
+    // Build update object
+    const updateFields = {}
+    if (firstName) updateFields.firstName = firstName
+    if (lastName) updateFields.lastName = lastName
+    if (firstName && lastName) updateFields.fullName = `${firstName} ${lastName}`
+    if (zipCode) updateFields.zipCode = zipCode
+    if (shoppingStyle) updateFields.shoppingStyle = shoppingStyle
+    if (phoneNumber !== undefined) updateFields.phoneNumber = phoneNumber
+    if (preferences) updateFields.preferences = preferences
+
+    // Update user
+    const user = await User.findByIdAndUpdate(req.user.id, { $set: updateFields }, { new: true }).select("-password")
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
     }
 
-    // Check if zip code is being updated
-    const zipCodeChanged = updates.zipCode && updates.zipCode !== req.user.zipCode
-
-    // Apply updates
-    allowedUpdates.forEach((update) => {
-      if (updates[update] !== undefined) {
-        req.user[update] = updates[update]
-      }
-    })
-
-    await req.user.save()
-
-    // If zip code changed, fetch new stores and product data
-    if (zipCodeChanged) {
-      // Create a new data fetch status record
-      const dataFetchStatus = new DataFetchStatus({
-        userId: req.user._id,
-        status: "pending",
-      })
-      await dataFetchStatus.save()
-
-      // Start background fetch
-      fetchDataInBackground(req.user._id, updates.zipCode, req.user.shoppingType)
-    }
-
-    res.json({
-      user: req.user,
-      dataFetchStatus: zipCodeChanged ? "pending" : "completed",
-    })
+    res.json(user)
   } catch (error) {
-    console.error("Error updating profile:", error)
+    console.error("Profile update error:", error)
     res.status(500).json({ message: "Server error", error: error.message })
   }
 })
 
-// Refresh product data
-router.post("/refresh-data", auth, async (req, res) => {
+// Change password
+router.put("/change-password", auth, async (req, res) => {
   try {
-    const { zipCode, shoppingType } = req.user
+    const { currentPassword, newPassword } = req.body
 
-    // Create a new data fetch status record
-    const dataFetchStatus = new DataFetchStatus({
-      userId: req.user._id,
-      status: "pending",
+    // Find user
+    const user = await User.findById(req.user.id)
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    // Check current password
+    const isMatch = await bcrypt.compare(currentPassword, user.password)
+
+    if (!isMatch) {
+      return res.status(400).json({ message: "Current password is incorrect" })
+    }
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(10)
+    user.password = await bcrypt.hash(newPassword, salt)
+
+    await user.save()
+
+    res.json({ message: "Password updated successfully" })
+  } catch (error) {
+    console.error("Password change error:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Send phone verification code
+router.post("/send-phone-verification", auth, async (req, res) => {
+  try {
+    const { phoneNumber } = req.body
+
+    // Find user
+    const user = await User.findById(req.user.id)
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    // Delete existing verification records
+    await SmsVerification.deleteMany({ userId: user._id })
+
+    // Create new verification code
+    const code = Math.floor(100000 + Math.random() * 900000).toString()
+    const smsVerification = new SmsVerification({
+      userId: user._id,
+      phoneNumber,
+      code,
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes
     })
-    await dataFetchStatus.save()
 
-    // Start background fetch
-    fetchDataInBackground(req.user._id, zipCode, shoppingType)
+    await smsVerification.save()
+
+    // Send verification SMS
+    await smsService.sendVerificationSms(phoneNumber, code)
 
     res.json({
-      message: "Product data refresh started",
-      dataFetchStatus: "pending",
+      message: "Verification code sent successfully",
+      code: process.env.NODE_ENV === "development" ? code : undefined,
     })
   } catch (error) {
-    console.error("Error starting data refresh:", error)
+    console.error("Send phone verification error:", error)
+    res.status(500).json({ message: "Server error", error: error.message })
+  }
+})
+
+// Verify phone number
+router.post("/verify-phone", auth, async (req, res) => {
+  try {
+    const { phoneNumber, code } = req.body
+
+    // Find verification record
+    const verification = await SmsVerification.findOne({ phoneNumber, code })
+
+    if (!verification) {
+      return res.status(400).json({ message: "Invalid verification code" })
+    }
+
+    // Check if code is expired
+    if (verification.expiresAt < Date.now()) {
+      return res.status(400).json({ message: "Verification code has expired" })
+    }
+
+    // Update user
+    const user = await User.findByIdAndUpdate(
+      verification.userId,
+      { phoneNumber, phoneVerified: true },
+      { new: true },
+    ).select("-password")
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    // Delete verification record
+    await SmsVerification.deleteOne({ _id: verification._id })
+
+    res.json({
+      message: "Phone number verified successfully",
+      user,
+    })
+  } catch (error) {
+    console.error("Phone verification error:", error)
     res.status(500).json({ message: "Server error", error: error.message })
   }
 })
