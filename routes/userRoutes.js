@@ -62,10 +62,11 @@ router.post("/verify-email", async (req, res) => {
         status: "pending",
         progress: 0,
         message: "Initializing your account...",
+        startedAt: new Date(),
       })
       await dataFetchStatus.save()
     } else {
-      // Update existing status
+      // Reset existing status
       dataFetchStatus.status = "pending"
       dataFetchStatus.progress = 0
       dataFetchStatus.message = "Initializing your account..."
@@ -75,8 +76,12 @@ router.post("/verify-email", async (req, res) => {
       await dataFetchStatus.save()
     }
 
-    // Start the background data fetch process
-    fetchDataInBackground(user._id, user.zipCode, user.shoppingStyle)
+    // Start the background data fetch process in a non-blocking way
+    setImmediate(() => {
+      fetchDataInBackground(user._id, user.zipCode, user.shoppingStyle).catch((err) =>
+        console.error(`Error in background data fetch for user ${user._id}:`, err),
+      )
+    })
 
     res.json({
       message: "Email verified successfully",
@@ -328,67 +333,30 @@ async function fetchDataInBackground(userId, zipCode, shoppingStyle) {
     console.log(`Starting background data fetch for user ${userId}...`)
 
     // Update status to in progress
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        status: "pending",
-        progress: 5,
-        message: "Starting data fetch process...",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 5, "Starting data fetch process...")
 
     // Step 1: Fetch nearby stores based on zip code (20%)
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 10,
-        message: "Fetching nearby stores...",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 10, "Fetching nearby stores...")
 
     console.log(`Fetching stores for zip code ${zipCode}...`)
     const stores = await storeService.getNearbyStores(zipCode)
     console.log(`Found ${stores.length} stores for zip code ${zipCode}`)
 
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 20,
-        message: "Stores data fetched successfully",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 20, "Stores data fetched successfully")
 
     // Step 2: Fetch product data from Walmart (40%)
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 25,
-        message: "Fetching product data...",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 25, "Fetching product data...")
 
     console.log("Fetching product data from Walmart...")
     const products = await apiIntegration.fetchAllStoreProducts(zipCode)
 
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 40,
-        message: "Product data fetched successfully",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 40, "Product data fetched successfully")
 
     // Step 3: Save products to database (60%)
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 45,
-        message: "Saving products to database...",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 45, "Saving products to database...")
 
     // Save products to database in a batch
-    if (products.length > 0) {
+    if (products && products.length > 0) {
       await apiIntegration.saveProductsToDatabase(products)
       console.log(`Saved ${products.length} products to database`)
     } else {
@@ -413,58 +381,28 @@ async function fetchDataInBackground(userId, zipCode, shoppingStyle) {
       }
     }
 
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 60,
-        message: "Products saved to database",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 60, "Products saved to database")
 
     // Step 4: Generate historical price data (80%)
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 65,
-        message: "Generating historical price data...",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 65, "Generating historical price data...")
 
     await generateHistoricalPriceData()
 
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 80,
-        message: "Historical price data generated",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 80, "Historical price data generated")
 
     // Step 5: Set up user's pantry with default items (90%)
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 85,
-        message: "Setting up your pantry...",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 85, "Setting up your pantry...")
 
     await setupUserPantry(userId)
 
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        progress: 90,
-        message: "Pantry setup complete",
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 90, "Pantry setup complete")
 
     // Get pantry items
     const pantryItems = await PantryItem.find({ category: "Pantry" }).limit(10)
     const produceItems = await PantryItem.find({ category: "Produce" }).limit(10)
 
     // Fetch prices for these items from the top stores
-    if (stores.length >= 3) {
+    if (stores && stores.length >= 3) {
       const topStores = stores.slice(0, 3)
 
       console.log(
@@ -475,13 +413,22 @@ async function fetchDataInBackground(userId, zipCode, shoppingStyle) {
       const allPriceUpdates = []
 
       for (const store of topStores) {
-        // Fetch prices for pantry items
-        const pantryPrices = await priceService.fetchStorePrices(store._id, pantryItems)
-        allPriceUpdates.push(...pantryPrices)
+        try {
+          // Fetch prices for pantry items
+          const pantryPrices = await priceService.fetchStorePrices(store._id, pantryItems)
+          if (pantryPrices && Array.isArray(pantryPrices)) {
+            allPriceUpdates.push(...pantryPrices)
+          }
 
-        // Fetch prices for produce items
-        const producePrices = await priceService.fetchStorePrices(store._id, produceItems)
-        allPriceUpdates.push(...producePrices)
+          // Fetch prices for produce items
+          const producePrices = await priceService.fetchStorePrices(store._id, produceItems)
+          if (producePrices && Array.isArray(producePrices)) {
+            allPriceUpdates.push(...producePrices)
+          }
+        } catch (storeError) {
+          console.error(`Error fetching prices for store ${store._id}:`, storeError)
+          // Continue with other stores
+        }
       }
 
       // Update all price history in one batch
@@ -492,15 +439,7 @@ async function fetchDataInBackground(userId, zipCode, shoppingStyle) {
     }
 
     // Update the data fetch status to completed
-    await DataFetchStatus.findOneAndUpdate(
-      { userId },
-      {
-        status: "completed",
-        progress: 100,
-        message: "Setup complete! You can now sign in.",
-        completedAt: new Date(),
-      },
-    )
+    await DataFetchStatus.updateProgress(userId, 100, "Setup complete! You can now sign in.")
 
     console.log(`Background data fetch completed for user ${userId}`)
   } catch (error) {
@@ -512,7 +451,7 @@ async function fetchDataInBackground(userId, zipCode, shoppingStyle) {
       {
         status: "failed",
         completedAt: new Date(),
-        error: error.message,
+        error: error.message || "An unknown error occurred",
       },
     )
   }

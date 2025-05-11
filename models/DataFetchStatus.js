@@ -37,6 +37,24 @@ const dataFetchStatusSchema = new mongoose.Schema({
 // Index to automatically expire documents after 7 days
 dataFetchStatusSchema.index({ startedAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60 })
 
+// Add a method to update progress
+dataFetchStatusSchema.statics.updateProgress = async function (userId, progress, message) {
+  try {
+    return await this.findOneAndUpdate(
+      { userId },
+      {
+        progress,
+        message,
+        ...(progress >= 100 ? { status: "completed", completedAt: new Date() } : {}),
+      },
+      { new: true },
+    )
+  } catch (error) {
+    console.error(`Error updating progress for user ${userId}:`, error)
+    return null
+  }
+}
+
 const DataFetchStatus = mongoose.model("DataFetchStatus", dataFetchStatusSchema)
 
 module.exports = DataFetchStatus
