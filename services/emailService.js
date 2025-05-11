@@ -1,151 +1,244 @@
 const nodemailer = require("nodemailer")
-const mongoose = require("mongoose")
 
-// Configure email transporter based on environment
-const getTransporter = () => {
-  // For development or testing, use a test account
-  if (process.env.NODE_ENV === "development" && process.env.USE_TEST_EMAIL === "true") {
-    console.log("Using test email account for development")
-    return nodemailer.createTransport({
+// Create a transporter
+let transporter
+
+// Initialize the transporter
+const initTransporter = async () => {
+  // Check if we should use test email (Ethereal)
+  if (process.env.USE_TEST_EMAIL === "true") {
+    // Create a test account at Ethereal
+    const testAccount = await nodemailer.createTestAccount()
+
+    transporter = nodemailer.createTransport({
       host: "smtp.ethereal.email",
       port: 587,
       secure: false,
       auth: {
-        user: process.env.TEST_EMAIL_USER,
-        pass: process.env.TEST_EMAIL_PASS,
+        user: process.env.TEST_EMAIL_USER || testAccount.user,
+        pass: process.env.TEST_EMAIL_PASS || testAccount.pass,
+      },
+    })
+
+    console.log("Using test email account:", testAccount.user)
+  } else {
+    // Use real email service
+    transporter = nodemailer.createTransport({
+      service: process.env.EMAIL_SERVICE,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD,
       },
     })
   }
-
-  // For production or if test mode is disabled
-  return nodemailer.createTransport({
-    service: process.env.EMAIL_SERVICE || "gmail",
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASSWORD,
-    },
-    // Add debug option for troubleshooting
-    debug: process.env.EMAIL_DEBUG === "true",
-  })
 }
 
-// Add better error handling and logging to the sendVerificationEmail function
-const sendVerificationEmail = async (to, code) => {
+// Send verification email
+const sendVerificationEmail = async (email, code, firstName) => {
   try {
-    // Create a test account if using test email
-    let testAccount
-    let transporter
-
-    if (process.env.USE_TEST_EMAIL === "true") {
-      console.log("Using test email account")
-      testAccount = await nodemailer.createTestAccount()
-
-      transporter = nodemailer.createTransport({
-        host: "smtp.ethereal.email",
-        port: 587,
-        secure: false,
-        auth: {
-          user: process.env.TEST_EMAIL_USER || testAccount.user,
-          pass: process.env.TEST_EMAIL_PASS || testAccount.pass,
-        },
-      })
-    } else {
-      // Use real email service
-      transporter = nodemailer.createTransport({
-        service: process.env.EMAIL_SERVICE,
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASSWORD,
-        },
-      })
+    // Initialize transporter if not already done
+    if (!transporter) {
+      await initTransporter()
     }
 
-    // Send mail with defined transport object
-    const info = await transporter.sendMail({
+    // Create email content with HTML
+    const mailOptions = {
       from: `"Grocery Price Tracker" <${process.env.EMAIL_USER}>`,
-      to: to,
-      subject: "Verify Your Email",
+      to: email,
+      subject: "Verify Your Email Address",
+      text: `Hello ${firstName},\n\nThank you for signing up! Your verification code is: ${code}\n\nThis code will expire in 24 hours.\n\nBest regards,\nThe Grocery Price Tracker Team`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
-          <h2 style="color: #4CAF50; text-align: center;">Verify Your Email</h2>
-          <p>Thank you for signing up for Grocery Price Tracker! Please use the verification code below to complete your registration:</p>
-          <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 5px; margin: 20px 0;">
-            ${code}
+          <div style="text-align: center; margin-bottom: 20px;">
+            <h1 style="color: #4CAF50;">Grocery Price Tracker</h1>
           </div>
-          <p>This code will expire in 30 minutes.</p>
-          <p>If you didn't request this verification, please ignore this email.</p>
-          <div style="margin-top: 30px; text-align: center; color: #666;">
-            <p>© ${new Date().getFullYear()} Grocery Price Tracker</p>
+          <div style="margin-bottom: 30px;">
+            <p>Hello ${firstName},</p>
+            <p>Thank you for signing up! Please use the verification code below to complete your registration:</p>
+            <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 5px; margin: 20px 0; border-radius: 5px;">
+              ${code}
+            </div>
+            <p>This code will expire in 24 hours.</p>
+          </div>
+          <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; color: #666; font-size: 12px;">
+            <p>If you didn't request this verification code, please ignore this email.</p>
+            <p>Best regards,<br>The Grocery Price Tracker Team</p>
           </div>
         </div>
       `,
-    })
+    }
 
-    if (process.env.EMAIL_DEBUG === "true" || process.env.USE_TEST_EMAIL === "true") {
-      console.log("Message sent: %s", info.messageId)
+    // Send the email
+    const info = await transporter.sendMail(mailOptions)
 
-      // Preview URL only available when sending through Ethereal/test email
+    // Log the result if in debug mode
+    if (process.env.EMAIL_DEBUG === "true") {
+      console.log("Email sent:", info)
+
+      // If using Ethereal, log the URL to view the email
       if (process.env.USE_TEST_EMAIL === "true") {
-        console.log("Preview URL: %s", nodemailer.getTestMessageUrl(info))
+        console.log("Preview URL:", nodemailer.getTestMessageUrl(info))
       }
     }
 
-    return { success: true, info }
+    return { success: true, messageId: info.messageId }
   } catch (error) {
     console.error("Error sending verification email:", error)
     return { success: false, error: error.message }
   }
 }
 
-// Send price alert email
-const sendPriceAlertEmail = async (user, items) => {
+// Send password reset email
+const sendPasswordResetEmail = async (email, resetToken, firstName) => {
   try {
-    if (!user.email) {
-      return { success: false, error: "User email not provided" }
+    // Initialize transporter if not already done
+    if (!transporter) {
+      await initTransporter()
     }
 
-    // Generate HTML for items
-    let itemsHtml = ""
-    items.forEach((item) => {
-      itemsHtml += `
-        <div style="margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 15px;">
-          <h3 style="margin: 0 0 5px 0;">${item.name}</h3>
-          <p style="margin: 0 0 5px 0;"><strong>Current Price:</strong> $${item.currentLowestPrice.price.toFixed(2)} at ${
-            item.currentLowestPrice.storeName
-          }</p>
-          <p style="margin: 0; color: #4CAF50;"><strong>${
-            item.priceAlerts?.buyRecommendationReason || "Price has changed"
-          }</strong></p>
-        </div>
-      `
-    })
+    const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`
 
-    // Send email
-    const transporter = getTransporter()
+    // Create email content with HTML
     const mailOptions = {
-      from: process.env.EMAIL_USER || "pantrytracker@example.com",
-      to: user.email,
-      subject: "Price Alerts - Pantry Tracker",
+      from: `"Grocery Price Tracker" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "Reset Your Password",
+      text: `Hello ${firstName},\n\nYou requested a password reset. Click the following link to reset your password: ${resetUrl}\n\nThis link will expire in 1 hour.\n\nIf you didn't request this, please ignore this email.\n\nBest regards,\nThe Grocery Price Tracker Team`,
       html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #4CAF50;">Price Alerts from Pantry Tracker</h2>
-          <p>Hello ${user.firstName || user.fullName || "there"},</p>
-          <p>We've found some great deals for items you're tracking:</p>
-          <div style="margin: 20px 0;">
-            ${itemsHtml}
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
+          <div style="text-align: center; margin-bottom: 20px;">
+            <h1 style="color: #4CAF50;">Grocery Price Tracker</h1>
           </div>
-          <p>Log in to your Pantry Tracker account to see more details.</p>
-          <p>Best regards,<br>The Pantry Tracker Team</p>
-          <p style="font-size: 12px; color: #888;">
-            You received this email because you signed up for price alerts. 
-            <a href="[unsubscribe_link]" style="color: #888;">Unsubscribe</a>
-          </p>
+          <div style="margin-bottom: 30px;">
+            <p>Hello ${firstName},</p>
+            <p>You requested a password reset. Click the button below to reset your password:</p>
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${resetUrl}" style="background-color: #4CAF50; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;">Reset Password</a>
+            </div>
+            <p>This link will expire in 1 hour.</p>
+            <p>If you didn't request this, please ignore this email.</p>
+          </div>
+          <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; color: #666; font-size: 12px;">
+            <p>If the button doesn't work, copy and paste this URL into your browser:</p>
+            <p style="word-break: break-all;">${resetUrl}</p>
+            <p>Best regards,<br>The Grocery Price Tracker Team</p>
+          </div>
         </div>
       `,
     }
 
+    // Send the email
     const info = await transporter.sendMail(mailOptions)
-    console.log(`Price alert email sent successfully: ${info.messageId}`)
+
+    // Log the result if in debug mode
+    if (process.env.EMAIL_DEBUG === "true") {
+      console.log("Password reset email sent:", info)
+
+      // If using Ethereal, log the URL to view the email
+      if (process.env.USE_TEST_EMAIL === "true") {
+        console.log("Preview URL:", nodemailer.getTestMessageUrl(info))
+      }
+    }
+
+    return { success: true, messageId: info.messageId }
+  } catch (error) {
+    console.error("Error sending password reset email:", error)
+    return { success: false, error: error.message }
+  }
+}
+
+// Send price alert email
+const sendPriceAlertEmail = async (email, alerts, firstName) => {
+  try {
+    // Initialize transporter if not already done
+    if (!transporter) {
+      await initTransporter()
+    }
+
+    // Create HTML for alerts
+    let alertsHtml = ""
+
+    alerts.forEach((alert) => {
+      const priceChange = alert.previousPrice - alert.currentPrice
+      const percentChange = ((priceChange / alert.previousPrice) * 100).toFixed(1)
+      const isDecrease = priceChange > 0
+
+      alertsHtml += `
+        <tr>
+          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0;">${alert.itemName}</td>
+          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0;">$${alert.currentPrice.toFixed(2)}</td>
+          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0;">$${alert.previousPrice.toFixed(2)}</td>
+          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0; color: ${isDecrease ? "#4CAF50" : "#f44336"};">
+            ${isDecrease ? "↓" : "↑"} ${Math.abs(percentChange)}%
+          </td>
+          <td style="padding: 12px; border-bottom: 1px solid #e0e0e0;">${alert.storeName}</td>
+        </tr>
+      `
+    })
+
+    // Create email content with HTML
+    const mailOptions = {
+      from: `"Grocery Price Tracker" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "Price Alert: Changes in Your Tracked Items",
+      text: `Hello ${firstName},\n\nWe've detected price changes in items you're tracking.\n\n${alerts
+        .map((alert) => {
+          const priceChange = alert.previousPrice - alert.currentPrice
+          const percentChange = ((priceChange / alert.previousPrice) * 100).toFixed(1)
+          const direction = priceChange > 0 ? "decreased" : "increased"
+          return `${alert.itemName}: ${direction} by ${Math.abs(percentChange)}% (now $${alert.currentPrice.toFixed(2)}, was $${alert.previousPrice.toFixed(2)}) at ${alert.storeName}`
+        })
+        .join("\n")}\n\nBest regards,\nThe Grocery Price Tracker Team`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
+          <div style="text-align: center; margin-bottom: 20px;">
+            <h1 style="color: #4CAF50;">Grocery Price Tracker</h1>
+          </div>
+          <div style="margin-bottom: 30px;">
+            <p>Hello ${firstName},</p>
+            <p>We've detected price changes in items you're tracking:</p>
+            
+            <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+              <thead>
+                <tr style="background-color: #f5f5f5;">
+                  <th style="padding: 12px; text-align: left; border-bottom: 2px solid #e0e0e0;">Item</th>
+                  <th style="padding: 12px; text-align: left; border-bottom: 2px solid #e0e0e0;">Current Price</th>
+                  <th style="padding: 12px; text-align: left; border-bottom: 2px solid #e0e0e0;">Previous Price</th>
+                  <th style="padding: 12px; text-align: left; border-bottom: 2px solid #e0e0e0;">Change</th>
+                  <th style="padding: 12px; text-align: left; border-bottom: 2px solid #e0e0e0;">Store</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${alertsHtml}
+              </tbody>
+            </table>
+            
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${process.env.FRONTEND_URL}/dashboard" style="background-color: #4CAF50; color: white; padding: 12px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;">View Dashboard</a>
+            </div>
+          </div>
+          <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; color: #666; font-size: 12px;">
+            <p>You're receiving this email because you've set up price alerts in your Grocery Price Tracker account.</p>
+            <p>To manage your notification preferences, visit your <a href="${process.env.FRONTEND_URL}/settings" style="color: #4CAF50;">account settings</a>.</p>
+            <p>Best regards,<br>The Grocery Price Tracker Team</p>
+          </div>
+        </div>
+      `,
+    }
+
+    // Send the email
+    const info = await transporter.sendMail(mailOptions)
+
+    // Log the result if in debug mode
+    if (process.env.EMAIL_DEBUG === "true") {
+      console.log("Price alert email sent:", info)
+
+      // If using Ethereal, log the URL to view the email
+      if (process.env.USE_TEST_EMAIL === "true") {
+        console.log("Preview URL:", nodemailer.getTestMessageUrl(info))
+      }
+    }
+
     return { success: true, messageId: info.messageId }
   } catch (error) {
     console.error("Error sending price alert email:", error)
@@ -153,65 +246,8 @@ const sendPriceAlertEmail = async (user, items) => {
   }
 }
 
-// Send recipe price update email
-const sendRecipePriceUpdateEmail = async (user, recipes) => {
-  try {
-    if (!user.email) {
-      return { success: false, error: "User email not provided" }
-    }
-
-    // Generate HTML for recipes
-    let recipesHtml = ""
-    recipes.forEach((recipe) => {
-      const changeClass = recipe.currentPrice.percentChange.weekly < 0 ? "green" : "red"
-      const changeSymbol = recipe.currentPrice.percentChange.weekly < 0 ? "↓" : "↑"
-
-      recipesHtml += `
-        <div style="margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 15px;">
-          <h3 style="margin: 0 0 5px 0;">${recipe.name}</h3>
-          <p style="margin: 0 0 5px 0;"><strong>Current Cost:</strong> $${recipe.currentPrice.totalPrice.toFixed(2)}</p>
-          <p style="margin: 0; color: ${changeClass === "green" ? "#4CAF50" : "#F44336"};">
-            <strong>Weekly Change: ${changeSymbol} ${Math.abs(recipe.currentPrice.percentChange.weekly).toFixed(1)}%</strong>
-          </p>
-        </div>
-      `
-    })
-
-    // Send email
-    const transporter = getTransporter()
-    const mailOptions = {
-      from: process.env.EMAIL_USER || "pantrytracker@example.com",
-      to: user.email,
-      subject: "Recipe Price Updates - Pantry Tracker",
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #4CAF50;">Recipe Price Updates</h2>
-          <p>Hello ${user.firstName || user.fullName || "there"},</p>
-          <p>Here's the latest cost update for your saved recipes:</p>
-          <div style="margin: 20px 0;">
-            ${recipesHtml}
-          </div>
-          <p>Log in to your Pantry Tracker account to see more details.</p>
-          <p>Best regards,<br>The Pantry Tracker Team</p>
-          <p style="font-size: 12px; color: #888;">
-            You received this email because you signed up for recipe price updates. 
-            <a href="[unsubscribe_link]" style="color: #888;">Unsubscribe</a>
-          </p>
-        </div>
-      `,
-    }
-
-    const info = await transporter.sendMail(mailOptions)
-    console.log(`Recipe price update email sent successfully: ${info.messageId}`)
-    return { success: true, messageId: info.messageId }
-  } catch (error) {
-    console.error("Error sending recipe price update email:", error)
-    return { success: false, error: error.message }
-  }
-}
-
 module.exports = {
   sendVerificationEmail,
+  sendPasswordResetEmail,
   sendPriceAlertEmail,
-  sendRecipePriceUpdateEmail,
 }
