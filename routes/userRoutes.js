@@ -339,8 +339,15 @@ async function fetchDataInBackground(userId, zipCode, shoppingStyle) {
     await DataFetchStatus.updateProgress(userId, 10, "Fetching nearby stores...")
 
     console.log(`Fetching stores for zip code ${zipCode}...`)
-    const stores = await storeService.getNearbyStores(zipCode)
-    console.log(`Found ${stores.length} stores for zip code ${zipCode}`)
+    let stores = await storeService.getNearbyStores(zipCode)
+
+    // Limit to maximum 10 stores
+    if (stores.length > 10) {
+      console.log(`Limiting from ${stores.length} to 10 stores for zip code ${zipCode}`)
+      stores = stores.slice(0, 10)
+    }
+
+    console.log(`Using ${stores.length} stores for zip code ${zipCode}`)
 
     await DataFetchStatus.updateProgress(userId, 20, "Stores data fetched successfully")
 
@@ -402,8 +409,9 @@ async function fetchDataInBackground(userId, zipCode, shoppingStyle) {
     const produceItems = await PantryItem.find({ category: "Produce" }).limit(10)
 
     // Fetch prices for these items from the top stores
-    if (stores && stores.length >= 3) {
-      const topStores = stores.slice(0, 3)
+    if (stores && stores.length > 0) {
+      // Get up to 3 stores
+      const topStores = stores.slice(0, Math.min(3, stores.length))
 
       console.log(
         `Fetching prices for ${pantryItems.length} pantry items and ${produceItems.length} produce items from ${topStores.length} stores...`,

@@ -21,8 +21,8 @@ const getNearbyStores = async (zipCode, radius = 32000) => {
     )
 
     if (placesResponse.data.status === "ZERO_RESULTS") {
-      console.warn(`No stores found for zip code ${zipCode} and radius ${radius}.`);
-      return []; // Return an empty array if no results are found
+      console.warn(`No stores found for zip code ${zipCode} and radius ${radius}.`)
+      return [] // Return an empty array if no results are found
     }
 
     if (placesResponse.data.status !== "OK") {
@@ -32,7 +32,11 @@ const getNearbyStores = async (zipCode, radius = 32000) => {
     // Process and save each store
     const stores = []
 
-    for (const place of placesResponse.data.results) {
+    // Limit to maximum 10 stores
+    const maxStores = 10
+    const placesToProcess = placesResponse.data.results.slice(0, maxStores)
+
+    for (const place of placesToProcess) {
       // Check if store already exists in our database
       let store = await Store.findOne({ placeId: place.place_id })
 
@@ -146,7 +150,7 @@ const getNearbyStores = async (zipCode, radius = 32000) => {
 const getStoresByZipCode = async (zipCode) => {
   try {
     // First check if we have stores for this zip code
-    const existingStores = await Store.find({ "address.zipCode": zipCode })
+    const existingStores = await Store.find({ "address.zipCode": zipCode }).limit(10)
 
     // If we have at least 3 stores, return them
     if (existingStores.length >= 3) {

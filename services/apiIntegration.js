@@ -24,7 +24,11 @@ const fetchWalmartProducts = async () => {
     console.log("Fetching Walmart products...");
 
     // Define search keywords for Walmart products - include produce keywords
-    const searchKeywords = ["kirkland organic mustard", "fresh apples"];
+    const searchKeywords = [
+      "kirkland organic mustard",
+      "kirkland organic flour",
+      "fresh apples"
+    ];
 
     const products = [];
     const apiKey = process.env.SCRAPER_API_KEY;
