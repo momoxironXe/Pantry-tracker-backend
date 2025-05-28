@@ -6,6 +6,10 @@ const newsItemSchema = new mongoose.Schema({
     required: true,
     trim: true,
   },
+  url: {
+    type: String,
+    required: false,
+  },
   content: {
     type: String,
     required: true,

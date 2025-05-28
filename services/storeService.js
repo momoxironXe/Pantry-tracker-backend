@@ -2,22 +2,12 @@ const axios = require("axios")
 const Store = require("../models/Store")
 
 // Get nearby stores based on zip code using Google Places API
-const getNearbyStores = async (zipCode, radius = 32000) => {
+const getNearbyStores = async (zipCode, {lat, lng}, radius = 32000) => {
   try {
-    // First, convert zip code to coordinates using Google Geocoding API
-    const geocodeResponse = await axios.get(
-      `https://maps.googleapis.com/maps/api/geocode/json?address=${zipCode}&key=${process.env.GOOGLE_MAPS_API_KEY}`,
-    )
-
-    if (geocodeResponse.data.status !== "OK") {
-      throw new Error(`Geocoding failed: ${geocodeResponse.data.status}`)
-    }
-
-    const { lat, lng } = geocodeResponse.data.results[0].geometry.location
 
     // Now search for grocery stores near these coordinates
     const placesResponse = await axios.get(
-      `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&keyword=pantry|grocery|food&key=${process.env.GOOGLE_MAPS_API_KEY}`,
+      `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&rankby=distance&keyword=pantry|grocery|food&key=${process.env.GOOGLE_MAPS_API_KEY}`,
     )
 
     if (placesResponse.data.status === "ZERO_RESULTS") {
@@ -132,7 +122,6 @@ const getNearbyStores = async (zipCode, radius = 32000) => {
           priceLevel: details.price_level || place.price_level,
           apiSupport,
         })
-        console.log(store)
         await store.save()
       }
 
@@ -149,8 +138,30 @@ const getNearbyStores = async (zipCode, radius = 32000) => {
 // Get stores by zip code from our database
 const getStoresByZipCode = async (zipCode) => {
   try {
-    // First check if we have stores for this zip code
-    const existingStores = await Store.find({ "address.zipCode": zipCode }).limit(10)
+
+    // First, find the coordinates for the given zip code
+    const geocodeResponse = await axios.get(
+      `https://maps.googleapis.com/maps/api/geocode/json?address=${zipCode}&key=${process.env.GOOGLE_MAPS_API_KEY}`,
+    )
+
+    if (geocodeResponse.data.status !== "OK") {
+      throw new Error(`Geocoding failed: ${geocodeResponse.data.status}`)
+    }
+
+    const { lat, lng } = geocodeResponse.data.results[0].geometry.location
+
+    // Use MongoDB's $geoNear to find stores sorted by distance
+    const existingStores = await Store.aggregate([
+      {
+        $geoNear: {
+          near: { type: "Point", coordinates: [lng, lat] },
+          distanceField: "distance", // Field to store the calculated distance
+          spherical: true,
+          maxDistance: 32000, // Optional: Limit to 32 km (20 miles)
+        },
+      },
+      { $limit: 10 }, // Limit to 10 stores
+    ])
 
     // If we have at least 3 stores, return them
     if (existingStores.length >= 3) {
@@ -158,7 +169,7 @@ const getStoresByZipCode = async (zipCode) => {
     }
 
     // Otherwise, fetch new stores from Google API
-    return await getNearbyStores(zipCode)
+    return await getNearbyStores(zipCode, {lat, lng})
   } catch (error) {
     console.error("Error in getStoresByZipCode:", error)
     throw error
